@@ -107,6 +107,7 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 	toAllocate := math.IntMin(allocation.MaxIPsToAllocate, limits.IPv4)
 	toAllocate = math.IntMin(maxENIIPCreate, toAllocate) // in first alloc no more than 10
 	// Validate whether request has already been fulfilled in the meantime
+	log.Infof("@@@ toAllocate: %v ,allocation: %v", toAllocate, allocation)
 	if toAllocate == 0 {
 		return 0, "", nil
 	}
@@ -201,9 +202,7 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 		return nil, stats, fmt.Errorf(errUnableToDetermineLimits)
 	}
 
-	// During preparation of IP allocations, the primary NIC is not considered
-	// for allocation, so we don't need to consider it for capacity calculation.
-	stats.NodeCapacity = limits.IPv4 * (limits.Adapters - 1)
+	stats.NodeCapacity = limits.IPv4 * limits.Adapters
 
 	instanceID := n.node.InstanceID()
 	available = ipamTypes.AllocationMap{}
@@ -211,7 +210,6 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	n.enis = map[string]eniTypes.ENI{}
-	n.poolsEnis = map[ipam.Pool][]string{}
 	scopedLog.Infof("!!!!!!!!!!!!!!!!!! Do Resync nics and ips, instanceID is %s, limits: %+v, available is %t", instanceID, limits, limitsAvailable)
 
 	n.manager.ForeachInstance(instanceID,
@@ -226,6 +224,11 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 			n.enis[e.ID] = *e
 			if pool := e.Pool; pool != "" {
 				n.poolsEnis[ipam.Pool(pool)] = append(n.poolsEnis[ipam.Pool(pool)], e.ID)
+			}
+
+			if utils.IsExcludedByTags(e.Tags) {
+				scopedLog.Infof("!!!!!!!!!!!! ENI %s is excluded by tags in Resync functions", e.ID)
+				return nil
 			}
 
 			availableOnENI := math.IntMax(limits.IPv4-len(e.SecondaryIPSets), 0)
@@ -249,7 +252,7 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 
 	stats.RemainingAvailableInterfaceCount += limits.Adapters - len(n.enis)
 
-	scopedLog.Infof("!!!!!!!!!!!! ResyncInterfacesAndIPs result, remainAvailableENIsCount is %d, available is %+v", stats.RemainingAvailableInterfaceCount, available)
+	scopedLog.Infof("!!!!!!!!!!!! ResyncInterfacesAndIPs result, stats is %+v, available is %+v", stats, available)
 	return available, stats, nil
 }
 
@@ -273,7 +276,7 @@ func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry, pool ipam.Pool) (*ip
 				continue
 			}
 		}
-		scopedLog.Infof("@@@@@@@@@@@@@@@@ Do prepare ip allocation for node: %s, n is %+v, eni type is %s, detail is %+v", n.node.InstanceID(), n, e.Type, e)
+		// scopedLog.Infof("@@@@@@@@@@@@@@@@ Do prepare ip allocation for node: %s, n is %+v, eni type is %s, detail is %+v", n.node.InstanceID(), n, e.Type, e)
 		scopedLog.WithFields(logrus.Fields{
 			fieldENIID:  e.ID,
 			"ipv4Limit": l.IPv4,
@@ -305,8 +308,9 @@ func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry, pool ipam.Pool) (*ip
 			}
 		}
 	}
+	log.Infof("@@@ l.Adapters %v,   len(nenis.):  %v", l.Adapters, len(n.enis))
 	a.EmptyInterfaceSlots = l.Adapters - len(n.enis)
-	scopedLog.Infof("@@@@@@@@@@@@@@@@ Do prepare ip allocation, result is %+v", a)
+	// scopedLog.Infof("@@@@@@@@@@@@@@@@ Do prepare ip allocation, result is %+v", a)
 	return a, nil
 }
 
@@ -547,12 +551,13 @@ func (n *Node) ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logr
 			}
 
 			n.enis[e.ID] = *e
-			if e.Pool == "" {
-				e.Pool = "default"
-			}
 
 			n.poolsEnis[ipam.Pool(e.Pool)] = append(n.poolsEnis[ipam.Pool(e.Pool)], e.ID)
 
+			if utils.IsExcludedByTags(e.Tags) {
+				scopedLog.Infof("!!!!!!!!!!!! ENI %s is excluded by tags in Resync functions", e.ID)
+				return nil
+			}
 			if _, ok := poolAvailable[ipam.Pool(e.Pool)]; !ok {
 				poolAvailable[ipam.Pool(e.Pool)] = ipamTypes.AllocationMap{}
 			}
@@ -586,15 +591,26 @@ func (n *Node) AllocateStaticIP(ctx context.Context, address string, interfaceId
 	n.mutex.Lock()
 
 	defer n.mutex.Unlock()
-	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Allocate static IP.....")
+	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Allocate static IP..... %v", address)
 	err := n.manager.api.AssignStaticPrivateIPAddresses(ctx, interfaceId, address)
 	return err
 }
 
 func (n *Node) UntieStaticIP(ctx context.Context, release *ipam.ReleaseAction) error {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
 	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Untie static IP.....")
 	err := n.manager.api.UnassignPrivateIPAddressesRetainPort(ctx, release.InterfaceID, release.IPsToRelease)
 	return err
+}
+
+func (n *Node) ReleaseStaticIP(address string, pool string) error {
+	if enis, ok := n.poolsEnis[ipam.Pool(pool)]; ok && len(enis) > 0 {
+		err := n.manager.api.DeleteNeutronPort(address, n.k8sObj.Spec.OpenStack.VPCID)
+		if err != nil {
+			log.Infof("@@@@@@@@ release static failed: %v", err)
+			return err
+		}
+	} else {
+		log.Debugf("@@@ no eni found in pool: %s", pool)
+	}
+	return nil
 }

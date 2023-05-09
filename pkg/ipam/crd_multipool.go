@@ -81,6 +81,8 @@ type crdPool struct {
 	stats *Statistics
 	mutex sync.RWMutex
 
+	logMutex sync.RWMutex
+
 	releaseExcessIPs bool
 
 	// Excess IPs from a cilium node would be marked for release only after a delay configured by excess-ip-release-delay
@@ -116,6 +118,8 @@ type crdPool struct {
 	waitingForPoolMaintenance bool
 
 	statistics PoolStatistics
+
+	needSyncCsip bool
 }
 
 // removeStaleReleaseIPs Removes stale entries in local n.ipReleaseStatus. Once the handshake is complete agent would
@@ -129,7 +133,7 @@ func (p *crdPool) removeStaleReleaseIPs() {
 			continue
 		}
 		if _, ok := p.node.resource.Status.IPAM.ReleaseIPs[ip]; !ok {
-			// delete(n.ipReleaseStatus[pool], ip)
+			delete(p.node.ipReleaseStatus, ip)
 		}
 	}
 }
@@ -162,10 +166,10 @@ func (p *crdPool) maintainCRDIPPool(ctx context.Context) (poolMutated bool, err 
 	return p.handleMultiPoolIPAllocation(ctx, a)
 }
 
-func (p *crdPool) determinePoolMaintenanceAction() (*maintenanceAction, error) {
-	var err error
-	a := &maintenanceAction{}
-
+func (p *crdPool) determinePoolMaintenanceAction() (a *maintenanceAction, err error) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	a = &maintenanceAction{}
 	scopedLog := p.logger()
 	stats := p.stats
 	// Validate that the node still requires addresses to be released, the
@@ -196,20 +200,15 @@ func (p *crdPool) determinePoolMaintenanceAction() (*maintenanceAction, error) {
 		surgeAllocate = numPendingPods - stats.NeededIPs
 	}
 
-	p.mutex.RLock()
 	// handleIPAllocation() takes a min of MaxIPsToAllocate and IPs available for allocation on the interface.
 	// This makes sure we don't try to allocate more than what's available.
-	// TODO getPoolMaxAboveWatermark
 	a.allocation.MaxIPsToAllocate = stats.NeededIPs + p.node.getMaxAboveWatermark() + surgeAllocate
-	p.mutex.RUnlock()
 
 	if a.allocation != nil {
-		p.mutex.Lock()
 		statistic := p.stats
 		statistic.RemainingInterfaces = a.allocation.InterfaceCandidates + a.allocation.EmptyInterfaceSlots
 		p.stats = statistic
 		stats = p.stats
-		p.mutex.Unlock()
 		scopedLog = scopedLog.WithFields(logrus.Fields{
 			"selectedInterface":      a.allocation.InterfaceID,
 			"selectedPoolID":         a.allocation.PoolID,
@@ -232,7 +231,8 @@ func (p *crdPool) determinePoolMaintenanceAction() (*maintenanceAction, error) {
 // handleMultiPoolIPAllocation allocates the necessary IPs needed to resolve deficit on the node.
 // If existing interfaces don't have enough capacity, new interface would be created.
 func (p *crdPool) handleMultiPoolIPAllocation(ctx context.Context, a *maintenanceAction) (poolMutated bool, err error) {
-
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	scopedLog := p.logger()
 	if a.allocation == nil {
 		scopedLog.Debug("No allocation action required")
@@ -261,27 +261,6 @@ func (p *crdPool) handleMultiPoolIPAllocation(ctx context.Context, a *maintenanc
 	return p.node.createInterface(ctx, a.allocation, p.name)
 }
 
-// handleIPReleaseResponse handles IPs agent has already responded to
-func (p *crdPool) handleIPReleaseResponse(markedIP string, ipsToRelease *[]string) bool {
-	p.node.mutex.Lock()
-	defer p.node.mutex.Unlock()
-	if p.node.resource.Status.IPAM.ReleaseIPs != nil {
-		if status, ok := p.node.resource.Status.IPAM.ReleaseIPs[markedIP]; ok {
-			switch status {
-			case ipamOption.IPAMReadyForRelease:
-				*ipsToRelease = append(*ipsToRelease, markedIP)
-			case ipamOption.IPAMDoNotRelease:
-				delete(p.ipsMarkedForRelease, markedIP)
-				delete(p.ipReleaseStatus, markedIP)
-			}
-			// 'released' state is already handled in removeStaleReleaseIPs()
-			// Other states don't need additional handling.
-			return true
-		}
-	}
-	return false
-}
-
 // handleIPRelease implements IP release handshake needed for releasing excess IPs on the node.
 // Operator initiates the handshake after an IP remains unused and excess for more than the number of seconds configured
 // by excess-ip-release-delay flag. Operator uses a map in ciliumnode's IPAM status field to exchange handshake
@@ -296,7 +275,6 @@ func (p *crdPool) handleIPReleaseResponse(markedIP string, ipsToRelease *[]strin
 //
 // Handshake would be aborted if there are new allocations and the node doesn't have IPs in excess anymore.
 func (p *crdPool) handleIPRelease(ctx context.Context, a *maintenanceAction) (instanceMutated bool, err error) {
-	log.Infof("@@@@ %v handleIPRelease %v", p.name, a.release)
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	return p.node.handleIPRelease(ctx, a)
@@ -371,9 +349,6 @@ func (p *crdPool) deleteLocalReleaseStatus(ip string) {
 //
 // n.mutex must be held when calling this function
 func (p *crdPool) getPreAllocate() int {
-	//if p.node.resource.Spec.IPAM.PreAllocatePerCrdPool[p.name.String()] != 0 {
-	//	return p.node.resource.Spec.IPAM.PreAllocatePerCrdPool[p.name.String()]
-	//}
 	return defaults.IPAMPreAllocation
 }
 
@@ -400,8 +375,8 @@ func (p *crdPool) getMaxAllocate() int {
 // allocationNeeded returns true if this crdPool requires IPs to be allocated
 func (p *crdPool) allocationNeeded() (needed bool) {
 	p.mutex.RLock()
+	defer p.mutex.RUnlock()
 	needed = !p.waitingForPoolMaintenance && p.resyncNeeded.IsZero() && p.stats.NeededIPs > 0
-	p.mutex.RUnlock()
 	return
 }
 
@@ -413,14 +388,13 @@ func (p *crdPool) requirePoolMaintenance() {
 
 func (p *crdPool) releaseNeeded() (needed bool) {
 	p.mutex.RLock()
+	defer p.mutex.RUnlock()
 	needed = p.releaseExcessIPs && !p.waitingForPoolMaintenance && p.resyncNeeded.IsZero() && p.stats.ExcessIPs > 0
 	if p.node.resource != nil {
 		releaseInProgress := len(p.node.resource.Status.IPAM.ReleaseIPs) > 0
 		needed = needed || releaseInProgress
 	}
-	p.mutex.RUnlock()
 	return
-
 }
 
 func (p *crdPool) GetAvailable() ipamTypes.AllocationMap {
@@ -442,9 +416,6 @@ func (p *crdPool) logger() *logrus.Entry {
 		return log
 	}
 
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-
 	return p.loggerLocked()
 }
 
@@ -463,16 +434,17 @@ func (p *crdPool) loggerLocked() (logger *logrus.Entry) {
 func (p *crdPool) poolMaintenanceComplete() {
 	p.mutex.Lock()
 	p.waitingForPoolMaintenance = false
-	p.mutex.Unlock()
+	defer p.mutex.Unlock()
 }
 
 func (p *crdPool) updateLastResync(syncTime time.Time) {
 	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if syncTime.After(p.resyncNeeded) {
 		p.loggerLocked().Debug("Resetting resyncNeeded")
 		p.resyncNeeded = time.Time{}
 	}
-	p.mutex.Unlock()
 }
 
 func (p *crdPool) requireResync() {
@@ -483,27 +455,16 @@ func (p *crdPool) requireResync() {
 
 func (p *crdPool) allocateStaticIP(ip string, pool Pool) error {
 	scopedLog := p.logger()
-
+	retryCount := 1
+retry:
 	stats := p.stats
 	allocation, err := p.node.ops.PrepareIPAllocation(scopedLog, p.name)
 	if err != nil {
+		log.Infof("@@@ PrepareIPAllocation error :%v", err)
 		return err
 	}
-	surgeAllocate := 0
-	numPendingPods, err := getPendingPodCountByPool(p.node.name, p.name)
-	if err != nil {
-		if p.node.logLimiter.Allow() {
-			scopedLog.WithError(err).Warningf("Unable to compute pending pods, will not surge-allocate")
-		}
-	} else if numPendingPods > stats.NeededIPs {
-		surgeAllocate = numPendingPods - stats.NeededIPs
-	}
-	p.mutex.RLock()
-	// handleIPAllocation() takes a min of MaxIPsToAllocate and IPs available for allocation on the interface.
-	// This makes sure we don't try to allocate more than what's available.
-	// TODO getPoolMaxAboveWatermark
-	allocation.MaxIPsToAllocate = stats.NeededIPs + p.node.getMaxAboveWatermark() + surgeAllocate
-	p.mutex.RUnlock()
+
+	allocation.MaxIPsToAllocate = 1
 
 	if allocation != nil {
 		statistic := p.stats
@@ -537,7 +498,9 @@ func (p *crdPool) allocateStaticIP(ip string, pool Pool) error {
 
 		start := time.Now()
 		err := p.node.ops.AllocateStaticIP(context.TODO(), ip, allocation.InterfaceID, pool)
+
 		if err == nil {
+			p.requireSyncCsip()
 			p.node.manager.metricsAPI.AllocationAttempt(allocateIP, success, string(allocation.PoolID), metrics.SinceInSeconds(start))
 			p.node.manager.metricsAPI.AddIPAllocation(string(allocation.PoolID), int64(allocation.AvailableForAllocation))
 			return nil
@@ -549,12 +512,36 @@ func (p *crdPool) allocateStaticIP(ip string, pool Pool) error {
 			"ipsToAllocate":     allocation.AvailableForAllocation,
 		}).WithError(err).Warning("Unable to assign additional IPs to interface, will create new interface")
 	}
-	created, err := p.node.createInterface(context.TODO(), allocation, p.name)
-	if err != nil {
-		log.Errorf("createInterface failed :%v", err)
+	created := false
+	if retryCount == 1 {
+		created, err = p.node.createInterface(context.TODO(), allocation, p.name)
+		if err != nil {
+			log.Errorf("createInterface failed :%v", err)
+			return fmt.Errorf("creted interface failed: %v", err)
+		}
 	}
+
 	if created {
-		return nil
+		if retryCount > 0 {
+			retryCount--
+			goto retry
+		}
 	}
-	return fmt.Errorf("creted interface failed: %v", err)
+
+	return fmt.Errorf("allocate static ip failed: %v", err)
+}
+
+func (p *crdPool) requireSyncCsip() {
+	p.needSyncCsip = true
+}
+
+func (p *crdPool) syncCsipComplete() {
+	p.mutex.Lock()
+	p.needSyncCsip = false
+	p.mutex.Unlock()
+
+}
+
+func (p *crdPool) waitingForSyncCsip() bool {
+	return p.needSyncCsip
 }

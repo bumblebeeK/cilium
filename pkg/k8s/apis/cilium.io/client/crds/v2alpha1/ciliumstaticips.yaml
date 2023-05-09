@@ -20,7 +20,24 @@ spec:
     singular: ciliumstaticip
   scope: Cluster
   versions:
-  - name: v2alpha1
+  - additionalPrinterColumns:
+    - description: Cilium static IP for this node
+      jsonPath: .spec.ip
+      name: CiliumStaticIP
+      type: string
+    - description: Node for csip
+      jsonPath: .spec.node-name
+      name: Node
+      type: string
+    - description: IP status of the csip
+      jsonPath: .status.ip-status
+      name: Status
+      type: string
+    - description: Time duration since creation of Ciliumnode
+      jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v2alpha1
     schema:
       openAPIV3Schema:
         description: CiliumStaticIP defines
@@ -55,7 +72,7 @@ spec:
             properties:
               ip-status:
                 type: string
-              release-time:
+              update-time:
                 description: Time is a wrapper around time.Time which supports correct
                   marshaling to YAML and JSON.  Wrappers are provided for many of
                   the factory methods that the time package offers.
@@ -68,6 +85,7 @@ spec:
         type: object
     served: true
     storage: true
+    subresources: {}
 status:
   acceptedNames:
     kind: ""

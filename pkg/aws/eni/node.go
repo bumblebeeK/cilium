@@ -786,6 +786,11 @@ func (n *Node) UntieStaticIP(ctx context.Context, release *ipam.ReleaseAction) e
 	panic("implement me")
 }
 
+func (n *Node) ReleaseStaticIP(address string, pool string) error {
+	// TODO implement me
+	panic("implement me")
+}
+
 // GetUsedIPWithPrefixes returns the total number of used IPs on the node including the prefixes allocated.
 // A prefix is considered as used if there is at least one allocated IP from that prefix. All IPs from a used prefix
 // are included in the count returned.

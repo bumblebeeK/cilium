@@ -15,6 +15,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
+	"strings"
 	"sync"
 )
 
@@ -37,7 +38,11 @@ func (m *Manager) Start(ctx hive.HookContext) (err error) {
 		utils.ListerWatcherFromTyped[*v2alpha1.CiliumStaticIPList](m.StaticIPInterface.CiliumStaticIPs()),
 		&v2alpha1.CiliumStaticIP{},
 		0,
-		cache.ResourceEventHandlerFuncs{},
+		cache.ResourceEventHandlerFuncs{
+			DeleteFunc: func(obj interface{}) {
+
+			},
+		},
 		transformToStaticIP,
 	)
 	go func() {
@@ -81,6 +86,15 @@ func (m *Manager) CreateStaticIP(staticIP *v2alpha1.CiliumStaticIP) error {
 	return nil
 }
 
+func (m *Manager) ListStaticIPs() []*v2alpha1.CiliumStaticIP {
+	ipsInt := staticIPStore.List()
+	out := make([]*v2alpha1.CiliumStaticIP, 0, len(ipsInt))
+	for i := range ipsInt {
+		out = append(out, ipsInt[i].(*v2alpha1.CiliumStaticIP))
+	}
+	return out
+}
+
 func transformToStaticIP(obj interface{}) (interface{}, error) {
 	switch concreteObj := obj.(type) {
 	case *v2alpha1.CiliumStaticIP:
@@ -97,8 +111,8 @@ func transformToStaticIP(obj interface{}) (interface{}, error) {
 				Pool:        concreteObj.Spec.Pool,
 			},
 			Status: v2alpha1.StaticIPStatus{
-				IPStatus:    concreteObj.Status.IPStatus,
-				ReleaseTime: concreteObj.Status.ReleaseTime,
+				IPStatus:   concreteObj.Status.IPStatus,
+				UpdateTime: concreteObj.Status.UpdateTime,
 			},
 		}
 		*concreteObj = v2alpha1.CiliumStaticIP{}
@@ -123,8 +137,8 @@ func transformToStaticIP(obj interface{}) (interface{}, error) {
 					RecycleTime: p.Spec.RecycleTime,
 				},
 				Status: v2alpha1.StaticIPStatus{
-					IPStatus:    p.Status.IPStatus,
-					ReleaseTime: p.Status.ReleaseTime,
+					IPStatus:   p.Status.IPStatus,
+					UpdateTime: p.Status.UpdateTime,
 				},
 			},
 		}
@@ -134,4 +148,13 @@ func transformToStaticIP(obj interface{}) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("unknown object type %T", concreteObj)
 	}
+}
+
+func (m *Manager) IsCSIPAddress(address string) (string, bool) {
+	for _, csip := range m.ListStaticIPs() {
+		if csip.Spec.IP == address {
+			return strings.Replace(csip.Name, "-", "/", 1), true
+		}
+	}
+	return "", false
 }

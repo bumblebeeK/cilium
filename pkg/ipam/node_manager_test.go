@@ -99,6 +99,10 @@ func (n *nodeOperationsMock) UntieStaticIP(ctx context.Context, release *Release
 	return nil
 }
 
+func (n *nodeOperationsMock) ReleaseStaticIP(address string, pool string) error {
+	return nil
+}
+
 func (n *nodeOperationsMock) UpdatedNode(obj *v2.CiliumNode) {}
 
 func (n *nodeOperationsMock) PopulateStatusFields(resource *v2.CiliumNode) {}

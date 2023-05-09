@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cilium/cilium/pkg/ipam/staticip"
 	"net"
 	"reflect"
 	"strconv"
@@ -81,11 +82,13 @@ type nodeStore struct {
 	mtuConfig MtuConfiguration
 
 	ipsToPool map[string]string
+
+	csipMgr *staticip.Manager
 }
 
 // newNodeStore initializes a new store which reflects the CiliumNode custom
 // resource of the specified node name
-func newNodeStore(nodeName string, conf Configuration, owner Owner, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration) *nodeStore {
+func newNodeStore(nodeName string, conf Configuration, owner Owner, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, csipMgr *staticip.Manager) *nodeStore {
 	log.WithField(fieldName, nodeName).Info("Subscribed to CiliumNode custom resource")
 
 	store := &nodeStore{
@@ -96,6 +99,12 @@ func newNodeStore(nodeName string, conf Configuration, owner Owner, clientset cl
 		clientset:          clientset,
 		ipsToPool:          map[string]string{},
 	}
+
+	if csipMgr != nil {
+		log.Infof("@@@@ with csipMgr ")
+		store.csipMgr = csipMgr
+	}
+
 	store.restoreFinished = make(chan struct{})
 
 	t, err := trigger.NewTrigger(trigger.Parameters{
@@ -667,6 +676,13 @@ func (n *nodeStore) allocateNext(poolAllocated map[string]ipamTypes.AllocationMa
 				continue
 			}
 
+			if n.csipMgr != nil {
+				if ownerBy, isCsip := n.csipMgr.IsCSIPAddress(ip); isCsip && ownerBy != owner {
+					log.Infof("@@@@ csipMgrcsipMgrcsipMgrcsipMgr")
+					continue
+				}
+			}
+
 			if DeriveFamily(parsedIP) != family {
 				continue
 			}
@@ -711,9 +727,9 @@ type crdAllocator struct {
 }
 
 // newCRDAllocator creates a new CRD-backed IP allocator
-func newCRDAllocator(family Family, c Configuration, owner Owner, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration) Allocator {
+func newCRDAllocator(family Family, c Configuration, owner Owner, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, csipMgr *staticip.Manager) Allocator {
 	initNodeStore.Do(func() {
-		sharedNodeStore = newNodeStore(nodeTypes.GetName(), c, owner, clientset, k8sEventReg, mtuConfig)
+		sharedNodeStore = newNodeStore(nodeTypes.GetName(), c, owner, clientset, k8sEventReg, mtuConfig, csipMgr)
 	})
 
 	allocator := &crdAllocator{
@@ -857,8 +873,10 @@ func (a *crdAllocator) Allocate(ip net.IP, owner string, pool Pool) (*Allocation
 		return nil, fmt.Errorf("IP Pool unexist")
 	}
 
-	if _, ok := a.poolAllocated[pool.String()][ip.String()]; ok {
-		return nil, fmt.Errorf("IP already in use")
+	if am, ok := a.poolAllocated[pool.String()][ip.String()]; ok {
+		if am.Owner != owner || am.Owner+" [restored]" != owner {
+			return nil, fmt.Errorf("IP already in use")
+		}
 	}
 
 	ipInfo, err := a.store.allocate(ip, pool)
@@ -886,8 +904,10 @@ func (a *crdAllocator) AllocateWithoutSyncUpstream(ip net.IP, owner string, pool
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	if _, ok := a.poolAllocated[pool.String()][ip.String()]; ok {
-		return nil, fmt.Errorf("IP already in use")
+	if am, ok := a.poolAllocated[pool.String()][ip.String()]; ok {
+		if am.Owner != owner || am.Owner+" [restored]" != owner {
+			return nil, fmt.Errorf("IP already in use")
+		}
 	}
 
 	ipInfo, err := a.store.allocate(ip, pool)

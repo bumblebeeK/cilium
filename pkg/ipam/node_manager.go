@@ -107,6 +107,8 @@ type NodeOperations interface {
 	AllocateStaticIP(ctx context.Context, address string, interfaceId string, pool Pool) error
 
 	UntieStaticIP(ctx context.Context, release *ReleaseAction) error
+
+	ReleaseStaticIP(address string, pool string) error
 }
 
 // AllocationImplementation is the interface an implementation must provide.
@@ -137,6 +139,10 @@ type AllocationImplementation interface {
 
 	// DeleteInstance deletes the instance from instances
 	DeleteInstance(instanceID string)
+
+	ExcludeIP(ip string)
+
+	IncludeIP(ip string)
 }
 
 // MetricsAPI represents the metrics being maintained by a NodeManager
@@ -250,6 +256,7 @@ func (n *NodeManager) Start(ctx context.Context) error {
 					return nil
 				},
 			})
+		log.Infoln("@@@@@ NodeManager wtf")
 	}()
 
 	return nil

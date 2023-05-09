@@ -67,6 +67,31 @@ type Node struct {
 	instanceID string
 }
 
+func (n *Node) ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logrus.Entry) (poolAvailable map[ipam.Pool]ipamTypes.AllocationMap, stats stats.InterfaceStats, err error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (n *Node) GetPoolUsedIPWithPrefixes(pool string) int {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (n *Node) AllocateStaticIP(ctx context.Context, address string, interfaceId string, pool ipam.Pool) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (n *Node) UntieStaticIP(ctx context.Context, release *ipam.ReleaseAction) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (n *Node) ReleaseStaticIP(address string, pool string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 // UpdatedNode is called when an update to the CiliumNode is received.
 func (n *Node) UpdatedNode(obj *v2.CiliumNode) {
 	n.mutex.Lock()

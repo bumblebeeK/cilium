@@ -8,6 +8,8 @@ import (
 )
 
 func (n *NodeManager) resyncNodeV2(ctx context.Context, node *Node, stats *resyncStats, syncTime time.Time) {
+	log.Infoln("@@@@ resyncNodeV2")
+	defer log.Infoln("@@@@ resyncNodeV2 end")
 	node.updateLastResyncV2(syncTime)
 	node.recalculateV2()
 	allocationNeeded := node.allocationNeededV2()
@@ -85,12 +87,4 @@ func (n *NodeManager) SyncMultiPool(node *Node) error {
 		}
 	}
 	return nil
-}
-
-func (n *Node) requirePoolMaintenanceV2() {
-	n.mutex.Lock()
-	for _, p := range n.pools {
-		p.requirePoolMaintenance()
-	}
-	n.mutex.Unlock()
 }

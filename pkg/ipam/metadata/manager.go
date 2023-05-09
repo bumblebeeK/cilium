@@ -158,15 +158,30 @@ func (m *Manager) GetIPPolicyForPod(owner string) (string, int, error) {
 		return "", 0, fmt.Errorf("failed to lookup pod %q: %w", namespace+"/"+name, err)
 	} else if !ok {
 		return "", 0, &ResourceNotFound{Resource: "Pod", Namespace: namespace, Name: name}
-	} else if policy, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainKey]; hasAnnotation {
-		if t, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainTime]; hasAnnotation {
-			time, err := strconv.Atoi(t)
-			if err != nil {
-				return policy, 0, nil
+	} else {
+		isJudgeNeededPod := false
+		if pod.OwnerReferences == nil {
+			isJudgeNeededPod = true
+		} else if len(pod.OwnerReferences) > 0 {
+			for _, o := range pod.OwnerReferences {
+				if o.Kind == "StatefulSet" {
+					isJudgeNeededPod = true
+					break
+				}
 			}
-			return policy, time, nil
-		} else {
-			return policy, 0, nil
+		}
+		if isJudgeNeededPod {
+			if policy, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainKey]; hasAnnotation {
+				if t, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainTime]; hasAnnotation {
+					time, err := strconv.Atoi(t)
+					if err != nil {
+						return policy, 0, nil
+					}
+					return policy, time, nil
+				} else {
+					return policy, 0, nil
+				}
+			}
 		}
 	}
 

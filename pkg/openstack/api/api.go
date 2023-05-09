@@ -208,7 +208,7 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
 	}
 
 	for _, iface := range networkInterfaces {
-		if !strings.HasPrefix(iface.DeviceOwner, VMDeviceOwner) || !strings.HasPrefix(iface.Name, VMInterfaceName) {
+		if !strings.HasPrefix(iface.DeviceOwner, VMDeviceOwner) {
 			continue
 		}
 		log.Errorf("######## networkInterface is %+v", iface)
@@ -431,16 +431,14 @@ func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, a
 		return err
 	}
 	for _, ip := range releasedIP {
-		p, err := c.getPortFromIP(port.NetworkID, ip)
+		port, err = c.getPortFromIP(port.NetworkID, ip)
 		if err != nil {
 			log.Errorf("######## Failed to get port: with ip %s, with error %s", ip, err)
 		}
-		log.Errorf("######## port: with ip %s result is: %+v", ip, p)
-		if p != nil {
-			err = c.deletePort(p.ID)
-			if err != nil {
-				log.Errorf("######## Failed to delete port %s with error: %+v", p.ID, err)
-			}
+		log.Errorf("######## port: with ip %s result is: %+v", ip, port)
+		err = c.deletePort(port.ID)
+		if err != nil {
+			log.Errorf("######## Failed to delete port %s with error: %+v", port.ID, err)
 		}
 	}
 
@@ -563,8 +561,6 @@ func parseENI(port *ports.Port, subnets ipamTypes.SubnetMap) (instanceID string,
 	nameSlice := strings.Split(port.Name, "-")
 	if strings.HasPrefix(port.Name, "cilium-vm-port-") && len(nameSlice) == 5 {
 		eni.Pool = nameSlice[len(nameSlice)-2]
-	} else {
-		eni.Pool = "default"
 	}
 
 	subnet, ok := subnets[subnetID]
@@ -663,7 +659,7 @@ func randomString(length int) string {
 }
 
 func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID string, address []string) error {
-	log.Errorf("Do Unassign ip addresses for nic %s, addresses to release is %s", eniID, address)
+	log.Errorf("@@@@ Do Unassign static ip addresses for nic %s, addresses to release is %s", eniID, address)
 
 	if len(address) != 1 {
 		return errors.New("no ip address need to be released")
@@ -687,9 +683,11 @@ func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID
 	if idx == -1 {
 		return errors.New(fmt.Sprintf("no address found attached in eni %v", eniID))
 	}
-	port.AllowedAddressPairs = append(port.AllowedAddressPairs[:idx], port.AllowedAddressPairs[idx+1:]...)
+	newAllowedAddressPairs := make([]ports.AddressPair, 0, len(port.AllowedAddressPairs)-1)
+	newAllowedAddressPairs = append(newAllowedAddressPairs, port.AllowedAddressPairs[:idx]...)
+	newAllowedAddressPairs = append(newAllowedAddressPairs, port.AllowedAddressPairs[idx+1:]...)
 
-	err = c.updatePortAllowedAddressPairs(eniID, port.AllowedAddressPairs)
+	err = c.updatePortAllowedAddressPairs(eniID, newAllowedAddressPairs)
 	if err != nil {
 		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
 		return err
@@ -709,20 +707,47 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 
 	allowedAddressPairs := port.AllowedAddressPairs
 
-	_, err = c.getPortFromIP(port.NetworkID, address)
+	p, err := c.getPortFromIP(port.NetworkID, address)
+	if p == nil {
+		_, err = c.createPort(PortCreateOpts{
+			Name:        fmt.Sprintf("cilium-pod-port-%s", randomString(10)),
+			NetworkID:   port.NetworkID,
+			IPAddress:   address,
+			SubnetID:    port.FixedIPs[0].SubnetID,
+			DeviceOwner: fmt.Sprintf(PodDeviceOwner+"%s", eniID),
+			ProjectID:   c.filters[ProjectID],
+		})
+		if err != nil {
+			log.Infof("@@@ back to create static port failed: %v", err)
+			return err
+		}
+		log.Infoln("@@@ back to create static port success")
+	}
 
 	if err != nil {
 		log.Errorf("######## Failed to get port with error %s", err)
 		return err
 	}
-	log.Infof("@@@@ AssignStaticPrivateIPAddresses %v", port.FixedIPs)
-	allowedAddressPairs = append(allowedAddressPairs, ports.AddressPair{IPAddress: port.FixedIPs[0].IPAddress})
-	log.Infof("@@@@ allowedAddressPairs %v", allowedAddressPairs)
 
+	for _, pair := range allowedAddressPairs {
+		if pair.IPAddress == address {
+			return nil
+		}
+	}
+
+	allowedAddressPairs = append(allowedAddressPairs, ports.AddressPair{IPAddress: address})
 	err = c.updatePortAllowedAddressPairs(eniID, allowedAddressPairs)
 	if err != nil {
 		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
 		return err
 	}
 	return nil
+}
+
+func (c *Client) DeleteNeutronPort(address string, networkID string) error {
+	port, err := c.getPortFromIP(networkID, address)
+	if err != nil {
+		return err
+	}
+	return c.deletePort(port.ID)
 }

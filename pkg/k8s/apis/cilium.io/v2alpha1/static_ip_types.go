@@ -14,6 +14,7 @@ const (
 	Idle              = "Idle"
 	Assigned          = "Assigned"
 	WaitingForRelease = "WaitingForRelease"
+	Untied            = "Untied"
 )
 
 const (
@@ -24,6 +25,10 @@ const (
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:printcolumn:JSONPath=".spec.ip",description="Cilium static IP for this node",name="CiliumStaticIP",type=string
+// +kubebuilder:printcolumn:JSONPath=".spec.node-name",description="Node for csip",name="Node",type=string
+// +kubebuilder:printcolumn:JSONPath=".status.ip-status",description="IP status of the csip",name="Status",type=string
+// +kubebuilder:printcolumn:JSONPath=".metadata.creationTimestamp",description="Time duration since creation of Ciliumnode",name="Age",type=date
 // +kubebuilder:resource:categories={cilium},singular="ciliumstaticip",path="ciliumstaticips",scope="Cluster",shortName={csip}
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
@@ -59,10 +64,7 @@ type StaticIPStatus struct {
 	IPStatus string `json:"ip-status"`
 
 	// +kubebuilder:validation:Optional
-	ReleaseTime v1.Time `json:"release-time"`
-
-	// +kubebuilder:validation:Optional
-	InterfaceId string `json:"interface-id"`
+	UpdateTime v1.Time `json:"update-time"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

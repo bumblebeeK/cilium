@@ -33,6 +33,7 @@ type OpenStackAPI interface {
 	UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID string, address []string) error
 	AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error
 	AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string) error
+	DeleteNeutronPort(address string, networkID string) error
 }
 
 // InstancesManager maintains the list of instances. It must be kept up to date
@@ -250,8 +251,14 @@ func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.T
 	return resyncStart
 }
 
-func (m *InstancesManager) excludeIP(ip string) {
+func (m *InstancesManager) ExcludeIP(ip string) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.excludeIPs[ip] = struct{}{}
+}
+
+func (m *InstancesManager) IncludeIP(ip string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.excludeIPs, ip)
 }

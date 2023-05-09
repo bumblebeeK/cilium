@@ -593,7 +593,7 @@ func (in *StaticIPStatus) DeepEqual(other *StaticIPStatus) bool {
 	if in.IPStatus != other.IPStatus {
 		return false
 	}
-	if !in.ReleaseTime.DeepEqual(&other.ReleaseTime) {
+	if !in.UpdateTime.DeepEqual(&other.UpdateTime) {
 		return false
 	}
 

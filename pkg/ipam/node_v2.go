@@ -25,14 +25,15 @@ type pool interface {
 	poolMaintenanceComplete()
 	requireResync()
 	allocateStaticIP(ip string, pool Pool) error
+	requireSyncCsip()
+	syncCsipComplete()
+	waitingForSyncCsip() bool
 }
 
 // MaintainIPPoolV2 attempts to allocate or release all required IPs to fulfill
 // the needed gap. If required, interfaces are created.
 func (n *Node) MaintainIPPoolV2(ctx context.Context) error {
-	n.manager.mutex.Lock()
-	n.manager.mutex.Unlock()
-
+	log.Infoln("@@@ MaintainIPPoolV2")
 	// As long as the instances API is unstable, don't perform any
 	// operation that can mutate state.
 	if !n.manager.InstancesAPIIsReady() {
@@ -52,7 +53,6 @@ func (n *Node) MaintainIPPoolV2(ctx context.Context) error {
 	var instanceMutated bool
 	var err error
 	var poolMutated bool
-	log.Infoln("@@ MaintainIPPoolV2")
 	for _, pool := range n.pools {
 		if pool.waitingForMaintenance() {
 			poolMutated, err = pool.maintainCRDIPPool(ctx)
@@ -65,11 +65,21 @@ func (n *Node) MaintainIPPoolV2(ctx context.Context) error {
 			}
 			pool.poolMaintenanceComplete()
 		}
+
+		if pool.waitingForSyncCsip() {
+			instanceMutated = true
+			pool.syncCsipComplete()
+		}
 	}
 	n.recalculateV2()
 
 	if instanceMutated || err != nil {
+		log.Infoln("@@@@ n.instanceSync ready Trigger()")
+
 		n.instanceSync.Trigger()
+		log.Infoln("@@@@ n.instanceSync end Trigger()")
+	} else {
+		log.Infoln("@@@ MaintainIPPoolV2 end")
 	}
 	return err
 }
@@ -82,6 +92,7 @@ func (n *Node) recalculateV2() {
 	scopedLog := n.logger()
 
 	a, stats, err := n.ops.ResyncInterfacesAndIPsByPool(context.TODO(), scopedLog)
+	log.Infoln("@@@ ResyncInterfacesAndIPsByPool")
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	if err != nil {
@@ -98,7 +109,6 @@ func (n *Node) recalculateV2() {
 	for _, poolUsed := range n.resource.Status.IPAM.PoolUsed {
 		n.stats.UsedIPs += len(poolUsed)
 	}
-
 	n.stats.NeededIPs = 0
 	n.stats.AvailableIPs = 0
 	n.stats.ExcessIPs = 0
@@ -109,9 +119,9 @@ func (n *Node) recalculateV2() {
 		n.stats.AvailableIPs += pool.getStatics().AvailableIPs
 		n.stats.NeededIPs += pool.getStatics().NeededIPs
 		n.stats.ExcessIPs += pool.getStatics().ExcessIPs
-		n.stats.RemainingInterfaces = stats.RemainingAvailableInterfaceCount
-		n.stats.Capacity = stats.NodeCapacity
 	}
+	n.stats.RemainingInterfaces = stats.RemainingAvailableInterfaceCount
+	n.stats.Capacity = stats.NodeCapacity
 	scopedLog.WithFields(logrus.Fields{
 		"available":                 n.stats.AvailableIPs,
 		"capacity":                  n.stats.Capacity,
@@ -158,17 +168,17 @@ func (n *Node) CrdPools() (pools map[string]ipamTypes.AllocationMap) {
 	pools = map[string]ipamTypes.AllocationMap{}
 	n.mutex.RLock()
 	for name, p := range n.pools {
-		pool := map[string]ipamTypes.AllocationIP{}
+		po := map[string]ipamTypes.AllocationIP{}
 		for k, allocationIP := range p.GetAvailable() {
-			pool[k] = allocationIP
+			po[k] = allocationIP
 		}
-		pools[name.String()] = pool
+		pools[name.String()] = po
 	}
 	n.mutex.RUnlock()
 	return
 }
 
-// syncToAPIServer synchronizes the contents of the CiliumNode resource
+// syncToAPIServerV2 synchronizes the contents of the CiliumNode resource
 // [(*Node).resource)] with the K8s apiserver. This operation occurs on an
 // interval to refresh the CiliumNode resource.
 //
@@ -259,4 +269,12 @@ func (n *Node) updateLastResyncV2(syncTime time.Time) {
 	for _, pool := range n.pools {
 		pool.updateLastResync(syncTime)
 	}
+}
+
+func (n *Node) requirePoolMaintenanceV2() {
+	n.mutex.Lock()
+	for _, p := range n.pools {
+		p.requirePoolMaintenance()
+	}
+	n.mutex.Unlock()
 }
