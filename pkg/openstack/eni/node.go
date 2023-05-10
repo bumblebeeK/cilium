@@ -117,7 +117,7 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 				"No matching subnet available for interface creation (VPC=%s AZ=%s SubnetID=%s)",
 				resource.Spec.OpenStack.VPCID,
 				resource.Spec.OpenStack.AvailabilityZone,
-				resource.Spec.OpenStack.SubnetID,
+				resource.Spec.OpenStack.SubnetIDs,
 			)
 	}
 	allocation.PoolID = ipamTypes.PoolID(subnet.ID)
@@ -433,16 +433,15 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, eniSpec eniTypes.Spec) (
 //     available.
 func (n *Node) findSuitableSubnet(spec eniTypes.Spec, limits ipamTypes.Limits) *ipamTypes.Subnet {
 	var subnet *ipamTypes.Subnet
-	ids := []string{spec.SubnetID}
-	log.Infof("@@@@@@@@@@@@@@@@@@ subnet id is %s", spec.SubnetID)
-	if len(spec.SubnetID) > 0 {
-		return n.manager.FindSubnetByIDs(spec.VPCID, spec.AvailabilityZone, ids)
+	if len(spec.SubnetIDs) > 0 {
+		return n.manager.FindSubnetByIDs(spec.VPCID, spec.AvailabilityZone, spec.SubnetIDs)
+	} else if len(spec.SubnetTags) > 0 {
+		return n.manager.FindSubnetByTags(spec.VPCID, spec.AvailabilityZone, spec.SubnetTags)
 	}
 
-	subnet = n.manager.GetSubnet(spec.SubnetID)
+	subnet = n.manager.GetSubnet(spec.NodeSubnetID)
 	return subnet
 }
-
 
 // findNextIndex returns the next available index with the provided index being
 // the first candidate. When calling this function, ensure that the mutex is

@@ -5,8 +5,9 @@ package eni
 
 import (
 	"context"
-	eniTypes "github.com/cilium/cilium/pkg/openstack/eni/types"
 	"time"
+
+	eniTypes "github.com/cilium/cilium/pkg/openstack/eni/types"
 
 	"github.com/sirupsen/logrus"
 
@@ -184,6 +185,25 @@ func (m *InstancesManager) FindSubnetByIDs(vpcID, availabilityZone string, subne
 		}
 	}
 	return bestSubnet
+}
+
+// FindSubnetByTags returns the subnet with the most addresses matching VPC ID,
+// availability zone and all required tags
+//
+// The returned subnet is immutable so it can be safely accessed
+func (m *InstancesManager) FindSubnetByTags(vpcID, availabilityZone string, required ipamTypes.Tags) (bestSubnet *ipamTypes.Subnet) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	for _, s := range m.subnets {
+		if s.VirtualNetworkID == vpcID && s.Tags.Match(required) {
+			if bestSubnet == nil || bestSubnet.AvailableAddresses < s.AvailableAddresses {
+				bestSubnet = s
+			}
+		}
+	}
+
+	return
 }
 
 // FindSecurityGroupByTags returns the security groups matching VPC ID and all required tags
