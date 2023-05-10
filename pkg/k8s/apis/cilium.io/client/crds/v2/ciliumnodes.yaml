@@ -434,9 +434,23 @@ spec:
                   vpc-id:
                     description: VPCID is the VPC ID to use when allocating ENIs.
                     type: string
-                  subnet-id:
-                    description: SubnetID is the ID of subnet id of ENI
+                  node-subnet-id:
+                    description: NodeSubnetID is the subnet of the primary ENI the
+                      instance was brought up with. It is used as a sensible default
+                      subnet to create ENIs in.
                     type: string
+                  subnet-ids:
+                    description: SubnetIDs is the list of subnet ids to use when evaluating
+                      what openstack subnets to use for ENI and IP allocation.
+                    items:
+                      type: string
+                    type: array
+                  subnet-tags:
+                    additionalProperties:
+                      type: string
+                    description: SubnetTags is the list of tags to use when evaluating
+                      what Openstack subnets to use for ENI and IP allocation.
+                    type: object
                 type: object
             type: object
           status:

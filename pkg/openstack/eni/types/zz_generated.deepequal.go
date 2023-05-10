@@ -27,9 +27,6 @@ func (in *ENI) DeepEqual(other *ENI) bool {
 	if in.Type != other.Type {
 		return false
 	}
-	if in.Number != other.Number {
-		return false
-	}
 	if ((in.SecurityGroups != nil) && (other.SecurityGroups != nil)) || ((in.SecurityGroups == nil) != (other.SecurityGroups == nil)) {
 		in, other := &in.SecurityGroups, &other.SecurityGroups
 		if other == nil {
@@ -142,7 +139,45 @@ func (in *Spec) DeepEqual(other *Spec) bool {
 	if in.CIDR != other.CIDR {
 		return false
 	}
-	if in.SubnetID != other.SubnetID {
+	if ((in.SubnetIDs != nil) && (other.SubnetIDs != nil)) || ((in.SubnetIDs == nil) != (other.SubnetIDs == nil)) {
+		in, other := &in.SubnetIDs, &other.SubnetIDs
+		if other == nil {
+			return false
+		}
+
+		if len(*in) != len(*other) {
+			return false
+		} else {
+			for i, inElement := range *in {
+				if inElement != (*other)[i] {
+					return false
+				}
+			}
+		}
+	}
+
+	if ((in.SubnetTags != nil) && (other.SubnetTags != nil)) || ((in.SubnetTags == nil) != (other.SubnetTags == nil)) {
+		in, other := &in.SubnetTags, &other.SubnetTags
+		if other == nil {
+			return false
+		}
+
+		if len(*in) != len(*other) {
+			return false
+		} else {
+			for key, inValue := range *in {
+				if otherValue, present := (*other)[key]; !present {
+					return false
+				} else {
+					if inValue != otherValue {
+						return false
+					}
+				}
+			}
+		}
+	}
+
+	if in.NodeSubnetID != other.NodeSubnetID {
 		return false
 	}
 	if ((in.SecurityGroups != nil) && (other.SecurityGroups != nil)) || ((in.SecurityGroups == nil) != (other.SecurityGroups == nil)) {

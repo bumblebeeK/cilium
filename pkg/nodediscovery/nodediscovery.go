@@ -729,8 +729,8 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
 				nodeResource.Spec.OpenStack.SecurityGroups = c.OpenStack.SecurityGroups
 			}
 
-			if c.OpenStack.SubnetID != "" {
-				nodeResource.Spec.OpenStack.SubnetID = c.OpenStack.SubnetID
+			if len(c.OpenStack.SubnetIDs) > 0 {
+				nodeResource.Spec.OpenStack.SubnetIDs = c.OpenStack.SubnetIDs
 			}
 
 			if c.OpenStack.VPCID != "" {

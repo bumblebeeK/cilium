@@ -32,21 +32,37 @@ type Spec struct {
 	// +kubebuilder:validation:Optional
 	VPCID string `json:"vpc-id,omitempty"`
 
-	// CIDR is vpc ipv4 CIDR
-	//
-	// +kubebuilder:validation:Optional
-	CIDR string `json:"cidr,omitempty"`
+	// // CIDR is vpc ipv4 CIDR
+	// //
+	// // +kubebuilder:validation:Optional
+	// CIDR string `json:"cidr,omitempty"`
 
 	// SubnetID is the ID of subnet id of ENI
 	//
 	// +kubebuilder:validation:Optional
-	SubnetID string `json:"subnet-id,omitempty"`
+	SubnetIDs []string `json:"subnet-ids,omitempty"`
+
+	// SubnetTags is the list of tags to use when evaluating what AWS
+	// subnets to use for ENI and IP allocation.
+	//
+	// +kubebuilder:validation:Optional
+	SubnetTags map[string]string `json:"subnet-tags,omitempty"`
+
+	// NodeSubnetID is the subnet of the primary ENI the instance was brought up
+	// with. It is used as a sensible default subnet to create ENIs in.
+	//
+	// +kubebuilder:validation:Optional
+	NodeSubnetID string `json:"node-subnet-id,omitempty"`
 
 	// SecurityGroups is the list of security groups to attach to any ENI
 	// that is created and attached to the instance.
 	//
 	// +kubebuilder:validation:Optional
 	SecurityGroups []string `json:"security-groups,omitempty"`
+
+	// CIDR is vpc ipv4 CIDR
+	// +kubebuilder:validation:Optional
+	CIDR string `json:"cidr,omitempty"`
 }
 
 const (

@@ -6,16 +6,17 @@ package api
 import (
 	"context"
 	"fmt"
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/attachinterfaces"
-	"github.com/gophercloud/gophercloud/pagination"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/attachinterfaces"
+	"github.com/gophercloud/gophercloud/pagination"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
