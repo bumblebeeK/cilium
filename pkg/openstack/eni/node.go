@@ -6,6 +6,7 @@ package eni
 import (
 	"context"
 	"fmt"
+	ipamStats "github.com/cilium/cilium/pkg/ipam/stats"
 
 	"github.com/sirupsen/logrus"
 
@@ -175,11 +176,15 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 // ResyncInterfacesAndIPs is called to retrieve and ENIs and IPs as known to
 // the OpenStack API and return them
-func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (available ipamTypes.AllocationMap, remainAvailableENIsCount int, err error) {
+func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (available ipamTypes.AllocationMap, stats ipamStats.InterfaceStats, err error) {
 	limits, limitsAvailable := n.getLimits()
 	if !limitsAvailable {
-		return nil, -1, fmt.Errorf(errUnableToDetermineLimits)
+		return nil, stats, fmt.Errorf(errUnableToDetermineLimits)
 	}
+
+	// During preparation of IP allocations, the primary NIC is not considered
+	// for allocation, so we don't need to consider it for capacity calculation.
+	stats.NodeCapacity = limits.IPv4 * (limits.Adapters - 1)
 
 	instanceID := n.node.InstanceID()
 	available = ipamTypes.AllocationMap{}
@@ -202,7 +207,7 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 
 			availableOnENI := math.IntMax(limits.IPv4-len(e.SecondaryIPSets), 0)
 			if availableOnENI > 0 {
-				remainAvailableENIsCount++
+				stats.RemainingAvailableInterfaceCount++
 			}
 
 			for _, ip := range e.SecondaryIPSets {
@@ -216,13 +221,13 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 	// An ECS instance has at least one ENI attached, no ENI found implies instance not found.
 	if enis == 0 {
 		scopedLog.Warning("Instance not found! Please delete corresponding ciliumnode if instance has already been deleted.")
-		return nil, -1, fmt.Errorf("unable to retrieve ENIs")
+		return nil, stats, fmt.Errorf("unable to retrieve ENIs")
 	}
 
-	remainAvailableENIsCount += limits.Adapters - len(n.enis)
+	stats.RemainingAvailableInterfaceCount += limits.Adapters - len(n.enis)
 
-	scopedLog.Infof("!!!!!!!!!!!! ResyncInterfacesAndIPs result, remainAvailableENIsCount is %d, available is %+v", remainAvailableENIsCount, available)
-	return available, remainAvailableENIsCount, nil
+	scopedLog.Infof("!!!!!!!!!!!! ResyncInterfacesAndIPs result, remainAvailableENIsCount is %d, available is %+v", stats.RemainingAvailableInterfaceCount, available)
+	return available, stats, nil
 }
 
 // PrepareIPAllocation returns the number of ENI IPs and interfaces that can be
@@ -442,7 +447,6 @@ func (n *Node) findSuitableSubnet(spec eniTypes.Spec, limits ipamTypes.Limits) *
 	subnet = n.manager.GetSubnet(spec.SubnetID)
 	return subnet
 }
-
 
 // findNextIndex returns the next available index with the provided index being
 // the first candidate. When calling this function, ensure that the mutex is
