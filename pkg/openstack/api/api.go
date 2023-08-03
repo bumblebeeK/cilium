@@ -5,7 +5,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/cilium/cilium/pkg/ipam"
 	"math/rand"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/attachinterfaces"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/attributestags"
 	"github.com/gophercloud/gophercloud/pagination"
 
 	"github.com/cilium/cilium/pkg/cidr"
@@ -40,6 +43,9 @@ const (
 	NetworkID = "network_id"
 	SubnetID  = "subnet_id"
 	ProjectID = "project_id"
+
+	VMInterfaceName  = "cilium-vm-port"
+	PodInterfaceName = "cilium-pod-port"
 
 	VMDeviceOwner  = "compute:"
 	PodDeviceOwner = "kubernetes:"
@@ -78,6 +84,7 @@ type PortCreateOpts struct {
 	DeviceID      string
 	DeviceOwner   string
 	Tags          string
+	TenantID      string
 }
 
 type FixedIPOpt struct {
@@ -201,7 +208,7 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
 	}
 
 	for _, iface := range networkInterfaces {
-		if !strings.HasPrefix(iface.DeviceOwner, VMDeviceOwner) {
+		if !strings.HasPrefix(iface.DeviceOwner, VMDeviceOwner) || !strings.HasPrefix(iface.Name, VMInterfaceName) {
 			continue
 		}
 		log.Errorf("######## networkInterface is %+v", iface)
@@ -291,11 +298,11 @@ func (c *Client) GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap,
 }
 
 // CreateNetworkInterface creates an ENI with the given parameters
-func (c *Client) CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string) (string, *eniTypes.ENI, error) {
+func (c *Client) CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool ipam.Pool) (string, *eniTypes.ENI, error) {
 	log.Errorf("######## Do create interface subnetid is: %s, networkid is: %s", subnetID, netID)
 
 	opt := PortCreateOpts{
-		Name:        fmt.Sprintf("cilium-vm-port-%s", randomString(10)),
+		Name:        fmt.Sprintf(VMInterfaceName+"-%s-%s", pool, randomString(10)),
 		NetworkID:   netID,
 		SubnetID:    subnetID,
 		DeviceOwner: fmt.Sprintf(VMDeviceOwner+"%s", instanceID),
@@ -315,7 +322,7 @@ func (c *Client) DeleteNetworkInterface(ctx context.Context, eniID string) error
 	return r.ExtractErr()
 }
 
-// AttachNetworkInterface attaches a previously created ENI to an instanceq
+// AttachNetworkInterface attaches a previously created ENI to an instance
 func (c *Client) AttachNetworkInterface(ctx context.Context, instanceID, eniID string) error {
 	log.Errorf("######## Do attach network interface #######")
 
@@ -328,6 +335,12 @@ func (c *Client) AttachNetworkInterface(ctx context.Context, instanceID, eniID s
 	}
 
 	return nil
+}
+
+// DetachNetworkInterface to detach a previously created ENI from an instance
+func (c *Client) DetachNetworkInterface(ctx context.Context, instanceID, eniID string) error {
+	log.Errorf("######## Do detach network interface #######")
+	return attachinterfaces.Delete(c.novaV2, instanceID, eniID).ExtractErr()
 }
 
 // AssignPrivateIPAddresses assigns the specified number of secondary IP
@@ -378,7 +391,59 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 // UnassignPrivateIPAddresses unassign specified IP addresses from ENI
 // should not provide Primary IP
 func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string) error {
-	log.Errorf("Do Unassign ip addresses for nic %s, count is %s", eniID, addresses)
+	log.Errorf("Do Unassign ip addresses for nic %s, addresses to release is %s", eniID, addresses)
+
+	port, err := c.getPort(eniID)
+	if err != nil {
+		log.Errorf("######## Failed to get port: %s, with error %s", eniID, err)
+		return err
+	}
+
+	var allowedAddressPairs []ports.AddressPair
+	var releasedIP []string
+
+	for _, pair := range port.AllowedAddressPairs {
+		release := false
+		for _, ip := range addresses {
+			if pair.IPAddress == ip {
+				release = true
+				releasedIP = append(releasedIP, ip)
+				break
+			}
+		}
+		if !release {
+			allowedAddressPairs = append(allowedAddressPairs, pair)
+		}
+	}
+
+	if len(releasedIP) != len(addresses) {
+		log.Errorf("########### Not mach, expected is %s, actual is %s", addresses, releasedIP)
+	}
+
+	log.Errorf("########### origin pairs is %s, new pairs is %s, expected is %s, actual is %s", port.AllowedAddressPairs, allowedAddressPairs, addresses, releasedIP)
+
+	err = c.updatePortAllowedAddressPairs(eniID, allowedAddressPairs)
+	if err != nil {
+		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
+		if err != nil {
+			log.Errorf("######## Failed to rollback to delete port with error: %+v", err)
+		}
+		return err
+	}
+	for _, ip := range releasedIP {
+		p, err := c.getPortFromIP(port.NetworkID, ip)
+		if err != nil {
+			log.Errorf("######## Failed to get port: with ip %s, with error %s", ip, err)
+		}
+		log.Errorf("######## port: with ip %s result is: %+v", ip, p)
+		if p != nil {
+			err = c.deletePort(p.ID)
+			if err != nil {
+				log.Errorf("######## Failed to delete port %s with error: %+v", p.ID, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -395,9 +460,44 @@ func (c Client) updatePortAllowedAddressPairs(eniID string, pairs []ports.Addres
 	return nil
 }
 
+// AddTagToNetworkInterface add tag to port
+func (c Client) AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error {
+	return attributestags.Add(c.neutronV2, "ports", eniID, tags).ExtractErr()
+}
+
 // get neutron port
 func (c Client) getPort(id string) (*ports.Port, error) {
 	return ports.Get(c.neutronV2, id).Extract()
+}
+
+// get neutron port with subnetID and ip address
+func (c Client) getPortFromIP(netID, ip string) (*ports.Port, error) {
+	var result []ports.Port
+	var err error
+
+	opts := ports.ListOpts{
+		NetworkID: netID,
+		FixedIPs: []ports.FixedIPOpts{
+			ports.FixedIPOpts{
+				IPAddress: ip,
+			},
+		},
+	}
+
+	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
+		result, err = ports.ExtractPorts(page)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+
+	if len(result) != 1 {
+		log.Errorf("######## port: with ip %s result is unexpected: %+v", ip, result)
+		return nil, fmt.Errorf("failed to get secondary ip")
+	}
+
+	return &result[0], nil
 }
 
 // create neturon port for both CreateNetworkInterface and AssignIpAddress
@@ -458,6 +558,13 @@ func parseENI(port *ports.Port, subnets ipamTypes.SubnetMap) (instanceID string,
 		VPC:            eniTypes.VPC{ID: port.NetworkID},
 		Subnet:         eniTypes.Subnet{ID: subnetID},
 		Type:           eniType,
+		Tags:           port.Tags,
+	}
+	nameSlice := strings.Split(port.Name, "-")
+	if strings.HasPrefix(port.Name, "cilium-vm-port-") && len(nameSlice) == 5 {
+		eni.Pool = nameSlice[len(nameSlice)-2]
+	} else {
+		eni.Pool = "default"
 	}
 
 	subnet, ok := subnets[subnetID]
@@ -467,13 +574,10 @@ func parseENI(port *ports.Port, subnets ipamTypes.SubnetMap) (instanceID string,
 
 	var ipsets []eniTypes.PrivateIPSet
 	for _, pairs := range port.AllowedAddressPairs {
-		log.Errorf("######## pairs ip is: %s, cidr is %+v", pairs.IPAddress, subnet.CIDR.IPNet)
 		if validIPAddress(pairs.IPAddress, subnet.CIDR.IPNet) {
 			ipsets = append(ipsets, eniTypes.PrivateIPSet{
 				IpAddress: pairs.IPAddress,
 			})
-
-			log.Errorf("######## add new ipset: %s", pairs.IPAddress)
 		}
 	}
 	eni.SecondaryIPSets = ipsets
@@ -556,4 +660,69 @@ func randomString(length int) string {
 		b[i] = CharSet[rand.Intn(len(CharSet))]
 	}
 	return string(b)
+}
+
+func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID string, address []string) error {
+	log.Errorf("Do Unassign ip addresses for nic %s, addresses to release is %s", eniID, address)
+
+	if len(address) != 1 {
+		return errors.New("no ip address need to be released")
+	}
+
+	port, err := c.getPort(eniID)
+	if err != nil {
+		log.Errorf("######## Failed to get port: %s, with error %s", eniID, err)
+		return err
+	}
+
+	idx := -1
+
+	for i, pair := range port.AllowedAddressPairs {
+		if pair.IPAddress == address[0] {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return errors.New(fmt.Sprintf("no address found attached in eni %v", eniID))
+	}
+	port.AllowedAddressPairs = append(port.AllowedAddressPairs[:idx], port.AllowedAddressPairs[idx+1:]...)
+
+	err = c.updatePortAllowedAddressPairs(eniID, port.AllowedAddressPairs)
+	if err != nil {
+		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string) error {
+	log.Errorf("######## Do Assign static ip addresses for nic %s", eniID)
+
+	port, err := c.getPort(eniID)
+	if err != nil {
+		log.Errorf("######## Failed to get port: %s, with error %s", eniID, err)
+		return err
+	}
+
+	allowedAddressPairs := port.AllowedAddressPairs
+
+	_, err = c.getPortFromIP(port.NetworkID, address)
+
+	if err != nil {
+		log.Errorf("######## Failed to get port with error %s", err)
+		return err
+	}
+	log.Infof("@@@@ AssignStaticPrivateIPAddresses %v", port.FixedIPs)
+	allowedAddressPairs = append(allowedAddressPairs, ports.AddressPair{IPAddress: port.FixedIPs[0].IPAddress})
+	log.Infof("@@@@ allowedAddressPairs %v", allowedAddressPairs)
+
+	err = c.updatePortAllowedAddressPairs(eniID, allowedAddressPairs)
+	if err != nil {
+		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
+		return err
+	}
+	return nil
 }

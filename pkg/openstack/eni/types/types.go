@@ -94,11 +94,6 @@ type ENI struct {
 	// +optional
 	Type string `json:"type,omitempty"`
 
-	// Number is the interface index
-	//
-	// +optional
-	Number int `json:"number,omitempty"`
-
 	// SecurityGroups are the security groups associated with the ENI
 	SecurityGroups []string `json:"security-groups,omitempty"`
 
@@ -116,6 +111,14 @@ type ENI struct {
 	//
 	// +optional
 	SecondaryIPSets []PrivateIPSet `json:"secondary-ipsets,omitempty"`
+
+	// Tags is the tags on this ENI
+	//
+	// +optional
+	Tags []string `json:"tags,omitempty"`
+
+	// +optional
+	Pool string `json:"pool,omitempty"`
 }
 
 // InterfaceID returns the identifier of the interface

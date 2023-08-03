@@ -1,0 +1,72 @@
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.11.4
+  creationTimestamp: null
+  name: staticips.cilium.io
+spec:
+  group: cilium.io
+  names:
+    categories:
+    - cilium
+    kind: StaticIP
+    listKind: StaticIPList
+    plural: staticips
+    shortNames:
+    - si
+    singular: staticip
+  scope: Cluster
+  versions:
+  - name: v2alpha1
+    schema:
+      openAPIV3Schema:
+        description: StaticIP defines
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              ip:
+                type: string
+              node-name:
+                type: string
+              pod-name:
+                type: string
+              release-time:
+                description: Time is a wrapper around time.Time which supports correct
+                  marshaling to YAML and JSON.  Wrappers are provided for many of
+                  the factory methods that the time package offers.
+                format: date-time
+                type: string
+            required:
+            - ip
+            - pod-name
+            - release-time
+            type: object
+          status:
+            type: string
+        required:
+        - spec
+        - status
+        type: object
+    served: true
+    storage: true
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []

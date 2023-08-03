@@ -56,17 +56,17 @@ func (n *Node) PopulateStatusFields(k8sObj *v2.CiliumNode) {
 }
 
 // PrepareIPRelease prepares the release of IPs
-func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.ReleaseAction {
+func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry, pool ipam.Pool) *ipam.ReleaseAction {
 	return &ipam.ReleaseAction{}
 }
 
 // ReleaseIPs performs the IP release operation
-func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
+func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction, pool ipam.Pool) error {
 	return fmt.Errorf("not implemented")
 }
 
 // PrepareIPAllocation returns the number of IPs that can be allocated/created.
-func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (a *ipam.AllocationAction, err error) {
+func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry, pool ipam.Pool) (a *ipam.AllocationAction, err error) {
 	a = &ipam.AllocationAction{}
 	requiredIfaceName := n.k8sObj.Spec.Azure.InterfaceName
 	n.manager.mutex.RLock()
@@ -117,7 +117,7 @@ func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (a *ipam.AllocationA
 }
 
 // AllocateIPs performs the Azure IP allocation operation
-func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error {
+func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction, pool ipam.Pool) error {
 	iface, ok := a.Interface.Resource.(*types.AzureInterface)
 	if !ok {
 		return fmt.Errorf("invalid interface object")
@@ -132,7 +132,7 @@ func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error 
 
 // CreateInterface is called to create a new interface. This operation is
 // currently not supported on Azure.
-func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry) (int, string, error) {
+func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry, pool ipam.Pool) (int, string, error) {
 	return 0, "", fmt.Errorf("not implemented")
 }
 

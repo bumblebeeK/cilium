@@ -78,15 +78,32 @@ type nodeOperationsMock struct {
 	allocatedIPs []string
 }
 
+func (n *nodeOperationsMock) ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logrus.Entry) (poolAvailable map[Pool]ipamTypes.AllocationMap, stats ipamStats.InterfaceStats, err error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (n *nodeOperationsMock) GetUsedIPWithPrefixes() int {
 	return len(n.allocatedIPs)
+}
+
+func (n *nodeOperationsMock) GetPoolUsedIPWithPrefixes(pool string) int {
+	return 0
+}
+
+func (n *nodeOperationsMock) AllocateStaticIP(ctx context.Context, ip string, interfaceId string, pool Pool) error {
+	return nil
+}
+
+func (n *nodeOperationsMock) UntieStaticIP(ctx context.Context, release *ReleaseAction) error {
+	return nil
 }
 
 func (n *nodeOperationsMock) UpdatedNode(obj *v2.CiliumNode) {}
 
 func (n *nodeOperationsMock) PopulateStatusFields(resource *v2.CiliumNode) {}
 
-func (n *nodeOperationsMock) CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *logrus.Entry) (int, string, error) {
+func (n *nodeOperationsMock) CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *logrus.Entry, pool Pool) (int, string, error) {
 	return 0, "operation not supported", fmt.Errorf("operation not supported")
 }
 
@@ -104,7 +121,7 @@ func (n *nodeOperationsMock) ResyncInterfacesAndIPs(ctx context.Context, scopedL
 	return available, stats, nil
 }
 
-func (n *nodeOperationsMock) PrepareIPAllocation(scopedLog *logrus.Entry) (*AllocationAction, error) {
+func (n *nodeOperationsMock) PrepareIPAllocation(scopedLog *logrus.Entry, pool Pool) (*AllocationAction, error) {
 	n.allocator.mutex.RLock()
 	defer n.allocator.mutex.RUnlock()
 	return &AllocationAction{
@@ -113,7 +130,7 @@ func (n *nodeOperationsMock) PrepareIPAllocation(scopedLog *logrus.Entry) (*Allo
 	}, nil
 }
 
-func (n *nodeOperationsMock) AllocateIPs(ctx context.Context, allocation *AllocationAction) error {
+func (n *nodeOperationsMock) AllocateIPs(ctx context.Context, allocation *AllocationAction, pool Pool) error {
 	n.mutex.Lock()
 	n.allocator.mutex.Lock()
 	n.allocator.allocatedIPs += allocation.AvailableForAllocation
@@ -126,7 +143,7 @@ func (n *nodeOperationsMock) AllocateIPs(ctx context.Context, allocation *Alloca
 	return nil
 }
 
-func (n *nodeOperationsMock) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ReleaseAction {
+func (n *nodeOperationsMock) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry, pool Pool) *ReleaseAction {
 	n.mutex.RLock()
 	excessIPs = math.IntMin(excessIPs, len(n.allocatedIPs))
 	r := &ReleaseAction{PoolID: testPoolID}
@@ -139,7 +156,7 @@ func (n *nodeOperationsMock) PrepareIPRelease(excessIPs int, scopedLog *logrus.E
 	return r
 }
 
-func (n *nodeOperationsMock) releaseIP(ip string) error {
+func (n *nodeOperationsMock) releaseIP(ip string, pool Pool) error {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	n.allocator.mutex.Lock()
@@ -156,7 +173,7 @@ func (n *nodeOperationsMock) releaseIP(ip string) error {
 
 func (n *nodeOperationsMock) ReleaseIPs(ctx context.Context, release *ReleaseAction) error {
 	for _, ipToDelete := range release.IPsToRelease {
-		if err := n.releaseIP(ipToDelete); err != nil {
+		if err := n.releaseIP(ipToDelete, ""); err != nil {
 			return fmt.Errorf("unable to release IP %s: %s", ipToDelete, err)
 		}
 	}

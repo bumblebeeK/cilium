@@ -90,7 +90,6 @@ func (lc *DefaultLifecycle) Start(ctx context.Context) error {
 
 	for _, hook := range lc.hooks {
 		fnName, exists := getHookFuncName(hook, true)
-
 		if !exists {
 			// Count as started as there might be a stop hook.
 			lc.numStarted++

@@ -5,7 +5,6 @@ package types
 
 import (
 	"fmt"
-
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/lock"
 )
@@ -46,6 +45,8 @@ type AllocationIP struct {
 	//
 	// +optional
 	Resource string `json:"resource,omitempty"`
+
+	Pool string `json:"pool,omitempty"`
 }
 
 // AllocationMap is a map of allocated IPs indexed by IP
@@ -117,6 +118,8 @@ type IPAMSpec struct {
 	// +optional
 	Pools IPAMPoolSpec `json:"pools,omitempty"`
 
+	CrdPools map[string]AllocationMap `json:"crd-pools,omitempty"`
+
 	// PodCIDRs is the list of CIDRs available to the node for allocation.
 	// When an IP is used, the IP will be added to Status.IPAM.Used
 	//
@@ -132,6 +135,15 @@ type IPAMSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	MinAllocate int `json:"min-allocate,omitempty"`
 
+	// PoolMinAllocate is the minimum number of IPs that must be allocated when
+	// the node is first bootstrapped. It defines the minimum base socket
+	// of addresses that must be available. After reaching this watermark,
+	// the PreAllocate and MaxAboveWatermark logic takes over to continue
+	// allocating IPs.
+	//
+	// +kubebuilder:validation:Minimum=0
+	PoolMinAllocate int `json:"pool-min-allocate,omitempty"`
+
 	// MaxAllocate is the maximum number of IPs that can be allocated to the
 	// node. When the current amount of allocated IPs will approach this value,
 	// the considered value for PreAllocate will decrease down to 0 in order to
@@ -139,6 +151,14 @@ type IPAMSpec struct {
 	//
 	// +kubebuilder:validation:Minimum=0
 	MaxAllocate int `json:"max-allocate,omitempty"`
+
+	// PoolMaxAllocate is the maximum number of IPs that can be allocated to the
+	// node. When the current amount of allocated IPs will approach this value,
+	// the considered value for PreAllocate will decrease down to 0 in order to
+	// not attempt to allocate more addresses than defined.
+	//
+	// +kubebuilder:validation:Minimum=0
+	PoolMaxAllocate int `json:"pool-max-allocate,omitempty"`
 
 	// PreAllocate defines the number of IP addresses that must be
 	// available for allocation in the IPAMspec. It defines the buffer of
@@ -176,6 +196,8 @@ type IPAMSpec struct {
 	//
 	// +kubebuilder:validation:Minimum=0
 	PodCIDRReleaseThreshold int `json:"pod-cidr-release-threshold,omitempty"`
+
+	EnableMultiPool bool `json:"enable-multi-pool,omitempty"`
 }
 
 // IPReleaseStatus  defines the valid states in IP release handshake
@@ -192,6 +214,9 @@ type IPAMStatus struct {
 	//
 	// +optional
 	Used AllocationMap `json:"used,omitempty"`
+
+	// +optional
+	PoolUsed map[string]AllocationMap `json:"pool-used,omitempty"`
 
 	// PodCIDRs lists the status of each pod CIDR allocated to this node.
 	//
@@ -228,6 +253,8 @@ type IPAMPoolDemand struct {
 	//
 	// +optional
 	IPv6Addrs int `json:"ipv6-addrs,omitempty"`
+
+	SubnetIds []string `json:"subnet-ids,omitempty"`
 }
 
 type PodCIDRMap map[string]PodCIDRMapEntry

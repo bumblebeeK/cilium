@@ -129,7 +129,7 @@ func (n *Node) getLimitsLocked() (ipamTypes.Limits, bool) {
 }
 
 // PrepareIPRelease prepares the release of ENI IPs.
-func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.ReleaseAction {
+func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry, pool ipam.Pool) *ipam.ReleaseAction {
 	r := &ipam.ReleaseAction{}
 
 	n.mutex.Lock()
@@ -205,7 +205,7 @@ func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
 
 // PrepareIPAllocation returns the number of ENI IPs and interfaces that can be
 // allocated/created.
-func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (a *ipam.AllocationAction, err error) {
+func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry, pool ipam.Pool) (a *ipam.AllocationAction, err error) {
 	limits, limitsAvailable := n.getLimits()
 	if !limitsAvailable {
 		return nil, fmt.Errorf(errUnableToDetermineLimits)
@@ -277,7 +277,7 @@ func isSubnetAtCapacity(err error) bool {
 }
 
 // AllocateIPs performs the ENI allocation oepration
-func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error {
+func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction, pool ipam.Pool) error {
 	// Check if the interface to allocate on is prefix delegated
 	n.mutex.RLock()
 	isPrefixDelegated := n.node.Ops().IsPrefixDelegated()
@@ -406,7 +406,7 @@ const (
 // attaches it to the instance as specified by the CiliumNode. neededAddresses
 // of secondary IPs are assigned to the interface up to the maximum number of
 // addresses as allowed by the instance.
-func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry) (int, string, error) {
+func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry, pool ipam.Pool) (int, string, error) {
 	limits, limitsAvailable := n.getLimits()
 	if !limitsAvailable {
 		return 0, unableToDetermineLimits, fmt.Errorf(errUnableToDetermineLimits)
@@ -772,6 +772,20 @@ func (n *Node) IsPrefixDelegated() bool {
 	return true
 }
 
+func (n *Node) GetPoolUsedIPWithPrefixes(pool string) int {
+	return 0
+}
+
+func (n *Node) AllocateStaticIP(ctx context.Context, ip string, interfaceId string, pool ipam.Pool) error {
+	// TODO implement me
+	panic("implement me")
+}
+
+func (n *Node) UntieStaticIP(ctx context.Context, release *ipam.ReleaseAction) error {
+	// TODO implement me
+	panic("implement me")
+}
+
 // GetUsedIPWithPrefixes returns the total number of used IPs on the node including the prefixes allocated.
 // A prefix is considered as used if there is at least one allocated IP from that prefix. All IPs from a used prefix
 // are included in the count returned.
@@ -867,4 +881,8 @@ func (n *Node) findSuitableSubnet(spec eniTypes.ENISpec, limits ipamTypes.Limits
 	}
 
 	return n.manager.FindSubnetByTags(spec.VpcID, spec.AvailabilityZone, nil)
+}
+
+func (n *Node) ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logrus.Entry) (poolAvailable map[ipam.Pool]ipamTypes.AllocationMap, stats stats.InterfaceStats, err error) {
+	panic("implement me")
 }

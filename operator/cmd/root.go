@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cilium/cilium/pkg/ipam"
 	"os"
 	"path/filepath"
 	"sync"
@@ -449,7 +450,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 		ipamOption.IPAMClusterPoolV2,
 		ipamOption.IPAMMultiPool,
 		ipamOption.IPAMAlibabaCloud,
-	    ipamOption.IPAMOpenStack:
+		ipamOption.IPAMOpenStack:
 		alloc, providerBuiltin := allocatorProviders[ipamMode]
 		if !providerBuiltin {
 			log.Fatalf("%s allocator is not supported by this version of %s", ipamMode, binaryName)
@@ -466,6 +467,9 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 		}
 
 		nm, err := alloc.Start(legacy.ctx, &ciliumNodeUpdateImplementation{legacy.clientset})
+
+		ipam.InitIPAMOpenStackExtra(legacy.clientset.Slim(), legacy.clientset.CiliumV2alpha1(), legacy.ctx.Done())
+
 		if err != nil {
 			log.WithError(err).Fatalf("Unable to start %s allocator", ipamMode)
 		}

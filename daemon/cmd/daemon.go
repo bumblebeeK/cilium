@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cilium/cilium/pkg/ipam/staticip"
 	"math/big"
 	"net"
 	"net/netip"
@@ -195,6 +196,8 @@ type Daemon struct {
 	cgroupManager *manager.CgroupManager
 
 	ipamMetadata *ipamMetadata.Manager
+
+	staticIPManager *staticip.Manager
 
 	apiLimiterSet *rate.APILimiterSet
 
@@ -548,6 +551,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		policyUpdater:        params.PolicyUpdater,
 		egressGatewayManager: params.EgressGatewayManager,
 		ipamMetadata:         params.IPAMMetadataManager,
+		staticIPManager:      params.StaticIPManager,
 		cniConfigManager:     params.CNIConfigManager,
 		clustermesh:          params.ClusterMesh,
 		monitorAgent:         params.MonitorAgent,

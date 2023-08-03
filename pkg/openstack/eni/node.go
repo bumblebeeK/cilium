@@ -6,18 +6,17 @@ package eni
 import (
 	"context"
 	"fmt"
-	ipamStats "github.com/cilium/cilium/pkg/ipam/stats"
-
-	"github.com/sirupsen/logrus"
-
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/ipam"
+	ipamStats "github.com/cilium/cilium/pkg/ipam/stats"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/math"
 	"github.com/cilium/cilium/pkg/openstack/eni/limits"
 	eniTypes "github.com/cilium/cilium/pkg/openstack/eni/types"
+	"github.com/cilium/cilium/pkg/openstack/utils"
+	"github.com/sirupsen/logrus"
 )
 
 // The following error constants represent the error conditions for
@@ -33,6 +32,7 @@ const (
 	errUnableToAttachENI         = "unable to attach ENI"
 	unableToAttachENI            = "unableToAttachENI"
 	unableToFindSubnet           = "unableToFindSubnet"
+	unableToTagENI               = "unableToTagENI"
 )
 
 const (
@@ -60,6 +60,8 @@ type Node struct {
 
 	// instanceID of the node
 	instanceID string
+
+	poolsEnis map[ipam.Pool][]string
 }
 
 // UpdatedNode is called when an update to the CiliumNode is received.
@@ -77,6 +79,7 @@ func (n *Node) PopulateStatusFields(resource *v2.CiliumNode) {
 	n.manager.ForeachInstance(n.node.InstanceID(),
 		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
 			e, ok := rev.Resource.(*eniTypes.ENI)
+			log.Infof("######## Populate Status eni details is %+v", e)
 			if ok {
 				resource.Status.OpenStack.ENIs[interfaceID] = *e.DeepCopy()
 			}
@@ -89,8 +92,8 @@ func (n *Node) PopulateStatusFields(resource *v2.CiliumNode) {
 // attaches it to the instance as specified by the CiliumNode. neededAddresses
 // of secondary IPs are assigned to the interface up to the maximum number of
 // addresses as allowed by the instance.
-func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry) (int, string, error) {
-	scopedLog.Infof("@@@@@@@@@@@@@@@@@@@ Do Create interface")
+func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry, pool ipam.Pool) (int, string, error) {
+	scopedLog.Infof("@@@@@@@@@@@@@@@@@@@ Do Create interface: pool is :%v", pool.String())
 	limits, limitsAvailable := n.getLimits()
 	if !limitsAvailable {
 		return 0, unableToDetermineLimits, fmt.Errorf(errUnableToDetermineLimits)
@@ -109,7 +112,7 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 	}
 
 	scopedLog.Infof("@@@@@@@@@@@@@@@@@@@ Do Create interface, openstack config is %+v", resource.Spec.OpenStack)
-	subnet := n.findSuitableSubnet(resource.Spec.OpenStack, limits)
+	subnet := n.findSuitableSubnet(resource.Spec.OpenStack, limits, pool.SubNetId())
 	scopedLog.Infof("@@@@@@@@@@@@@@@@ Find subnet: %+v", subnet)
 	if subnet == nil {
 		return 0,
@@ -138,19 +141,15 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 	scopedLog.Info("No more IPs available, creating new ENI")
 
 	instanceID := n.node.InstanceID()
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
-
-	index := n.findNextIndex(0)
-
 	netID := resource.Spec.OpenStack.VPCID
-	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, subnet.ID, netID, instanceID, securityGroupIDs)
+	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, subnet.ID, netID, instanceID, securityGroupIDs, pool)
+	eni.Pool = pool.String()
 	if err != nil {
 		return 0, unableToCreateENI, fmt.Errorf("%s %s", errUnableToCreateENI, err)
 	}
 
 	scopedLog = scopedLog.WithField(fieldENIID, eniID)
-	scopedLog.Info("Created new ENI")
+	scopedLog.Infof("Created new ENI, belong to pool: %s", pool.String())
 
 	if subnet.CIDR != nil {
 		eni.Subnet.CIDR = subnet.CIDR.String()
@@ -158,15 +157,35 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 	err = n.manager.api.AttachNetworkInterface(ctx, instanceID, eniID)
 	if err != nil {
-		err2 := n.manager.api.DeleteNetworkInterface(ctx, eniID)
-		if err2 != nil {
-			scopedLog.Errorf("Failed to release ENI after failure to attach, %s", err2.Error())
+		err = n.manager.api.DeleteNetworkInterface(ctx, eniID)
+		if err != nil {
+			scopedLog.Errorf("Failed to release ENI after failure to attach, %s", err.Error())
 		}
 		return 0, unableToAttachENI, fmt.Errorf("%s %s", errUnableToAttachENI, err)
 	}
 
-	eni.Number = int(index)
+	index, err := n.allocENIIndex()
+	if err != nil {
+		scopedLog.WithField("instanceID", instanceID).Error(err)
+		return 0, "Failed to allocate eni index", err
+	}
+	scopedLog.Info("########### got index is %d", index)
+	err = n.manager.api.AddTagToNetworkInterface(ctx, eniID, utils.FillTagWithENIIndex(index))
+	if err != nil {
+		scopedLog.Errorf("########### Failed to add tag with error: %+v, %s ", err, err)
+		err = n.manager.api.DetachNetworkInterface(ctx, instanceID, eniID)
+		if err != nil {
+			scopedLog.Errorf("Failed to detach ENI after failure to tag index, %s", err.Error())
+		}
+		err = n.manager.api.DeleteNetworkInterface(ctx, eniID)
+		if err != nil {
+			scopedLog.Errorf("Failed to release ENI after failure to tag index, %s", err.Error())
+		}
+		return 0, unableToTagENI, fmt.Errorf("%s %s", unableToTagENI, err)
+	}
+
 	n.enis[eniID] = *eni
+	n.poolsEnis[pool] = append(n.poolsEnis[pool], eniID)
 	scopedLog.Info("Attached ENI to instance with index:%d", index)
 
 	// Add the information of the created ENI to the instances manager
@@ -192,6 +211,7 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	n.enis = map[string]eniTypes.ENI{}
+	n.poolsEnis = map[ipam.Pool][]string{}
 	scopedLog.Infof("!!!!!!!!!!!!!!!!!! Do Resync nics and ips, instanceID is %s, limits: %+v, available is %t", instanceID, limits, limitsAvailable)
 
 	n.manager.ForeachInstance(instanceID,
@@ -204,6 +224,9 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 			}
 
 			n.enis[e.ID] = *e
+			if pool := e.Pool; pool != "" {
+				n.poolsEnis[ipam.Pool(pool)] = append(n.poolsEnis[ipam.Pool(pool)], e.ID)
+			}
 
 			availableOnENI := math.IntMax(limits.IPv4-len(e.SecondaryIPSets), 0)
 			if availableOnENI > 0 {
@@ -232,7 +255,7 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
 
 // PrepareIPAllocation returns the number of ENI IPs and interfaces that can be
 // allocated/created.
-func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (*ipam.AllocationAction, error) {
+func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry, pool ipam.Pool) (*ipam.AllocationAction, error) {
 	l, limitsAvailable := n.getLimits()
 	if !limitsAvailable {
 		return nil, fmt.Errorf(errUnableToDetermineLimits)
@@ -243,11 +266,17 @@ func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (*ipam.AllocationAct
 	defer n.mutex.RUnlock()
 
 	for key, e := range n.enis {
+
+		// enis that belong to the pool
+		if pool != "" {
+			if e.Pool != pool.String() {
+				continue
+			}
+		}
 		scopedLog.Infof("@@@@@@@@@@@@@@@@ Do prepare ip allocation for node: %s, n is %+v, eni type is %s, detail is %+v", n.node.InstanceID(), n, e.Type, e)
 		scopedLog.WithFields(logrus.Fields{
 			fieldENIID:  e.ID,
 			"ipv4Limit": l.IPv4,
-			"index":     e.Number,
 			"allocated": len(e.SecondaryIPSets),
 		}).Debug("Considering ENI for allocation")
 
@@ -282,14 +311,14 @@ func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (*ipam.AllocationAct
 }
 
 // AllocateIPs performs the ENI allocation operation
-func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error {
+func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction, pool ipam.Pool) error {
 	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Allocate IPs.....")
 	_, err := n.manager.api.AssignPrivateIPAddresses(ctx, a.InterfaceID, a.AvailableForAllocation)
 	return err
 }
 
 // PrepareIPRelease prepares the release of ENI IPs.
-func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.ReleaseAction {
+func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry, pool ipam.Pool) *ipam.ReleaseAction {
 	r := &ipam.ReleaseAction{}
 
 	n.mutex.Lock()
@@ -297,22 +326,27 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.Re
 
 	// Iterate over ENIs on this node, select the ENI with the most
 	// addresses available for release
-	for key, e := range n.enis {
-		if e.Type != eniTypes.ENITypeSecondary {
+	for _, eid := range n.poolsEnis[pool] {
+		var e eniTypes.ENI
+		var ok bool
+		if e, ok = n.enis[eid]; !ok {
 			continue
 		}
 		scopedLog.WithFields(logrus.Fields{
 			fieldENIID:     e.ID,
-			"index":        e.Number,
 			"numAddresses": len(e.SecondaryIPSets),
 		}).Debug("Considering ENI for IP release")
 
+		if e.Type != eniTypes.ENITypePrimary {
+			continue
+		}
 		// Count free IP addresses on this ENI
 		ipsOnENI := n.k8sObj.Status.OpenStack.ENIs[e.ID].SecondaryIPSets
 		freeIpsOnENI := []string{}
 		for _, ip := range ipsOnENI {
-			_, ipUsed := n.k8sObj.Status.IPAM.Used[ip.IpAddress]
-			if !ipUsed {
+			_, ipUsed := n.k8sObj.Status.IPAM.PoolUsed[pool.String()][ip.IpAddress]
+			_, ipExcluded := n.manager.excludeIPs[ip.IpAddress]
+			if !ipUsed && !ipExcluded {
 				freeIpsOnENI = append(freeIpsOnENI, ip.IpAddress)
 			}
 		}
@@ -329,7 +363,7 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.Re
 		}).Debug("ENI has unused IPs that can be released")
 		maxReleaseOnENI := math.IntMin(freeOnENICount, excessIPs)
 
-		r.InterfaceID = key
+		r.InterfaceID = eid
 		r.PoolID = ipamTypes.PoolID(e.VPC.ID)
 		r.IPsToRelease = freeIpsOnENI[:maxReleaseOnENI]
 	}
@@ -384,6 +418,16 @@ func (n *Node) GetUsedIPWithPrefixes() int {
 	return len(n.k8sObj.Status.IPAM.Used)
 }
 
+func (n *Node) GetPoolUsedIPWithPrefixes(pool string) int {
+	if n.k8sObj == nil {
+		return 0
+	}
+	if allocate, ok := n.k8sObj.Status.IPAM.PoolUsed[pool]; ok {
+		return len(allocate)
+	}
+	return 0
+}
+
 // getLimits returns the interface and IP limits of this node
 func (n *Node) getLimits() (ipamTypes.Limits, bool) {
 	n.mutex.RLock()
@@ -436,8 +480,11 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, eniSpec eniTypes.Spec) (
 //     created in, to avoid putting the ENI in a surprising subnet if possible.
 //  3. If none of these work, fall back to just choosing the subnet with the most addresses
 //     available.
-func (n *Node) findSuitableSubnet(spec eniTypes.Spec, limits ipamTypes.Limits) *ipamTypes.Subnet {
+func (n *Node) findSuitableSubnet(spec eniTypes.Spec, limits ipamTypes.Limits, subnetId string) *ipamTypes.Subnet {
 	var subnet *ipamTypes.Subnet
+	if subnetId != "" {
+		return n.manager.GetSubnet(subnetId)
+	}
 	if len(spec.SubnetIDs) > 0 {
 		return n.manager.FindSubnetByIDs(spec.VPCID, spec.AvailabilityZone, spec.SubnetIDs)
 	} else if len(spec.SubnetTags) > 0 {
@@ -448,27 +495,106 @@ func (n *Node) findSuitableSubnet(spec eniTypes.Spec, limits ipamTypes.Limits) *
 	return subnet
 }
 
-// findNextIndex returns the next available index with the provided index being
-// the first candidate. When calling this function, ensure that the mutex is
-// not held as this function read-locks the mutex to protect access to
-// `n.enis`.
-func (n *Node) findNextIndex(index int32) int32 {
-	n.mutex.RLock()
-	defer n.mutex.RUnlock()
-
-	for indexExists(n.enis, index) {
-		index++
+// allocENIIndex will alloc an monotonically increased index for each ENI on this instance.
+// The index generated the first time this ENI is created, and stored in ENI.Tags.
+func (n *Node) allocENIIndex() (int, error) {
+	// alloc index for each created ENI
+	used := make([]bool, maxENIPerNode)
+	for _, v := range n.enis {
+		index := utils.GetENIIndexFromTags(v.Tags)
+		if index > maxENIPerNode || index < 0 {
+			return 0, fmt.Errorf("ENI index(%d) is out of range", index)
+		}
+		used[index] = true
 	}
-	return int32(index)
-}
-
-// indexExists returns true if the specified index is occupied by an ENI in the
-// slice of ENIs
-func indexExists(enis map[string]eniTypes.ENI, index int32) bool {
-	for _, e := range enis {
-		if e.Number == int(index) {
-			return true
+	// ECS has at least 1 ENI, 0 is reserved for eth0
+	i := 1
+	for ; i < maxENIPerNode; i++ {
+		if !used[i] {
+			break
 		}
 	}
-	return false
+	return i, nil
+}
+
+// ResyncInterfacesAndIPsByPool is called to retrieve and ENIs and IPs as known to
+// the OpenStack API and return them
+func (n *Node) ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logrus.Entry) (poolAvailable map[ipam.Pool]ipamTypes.AllocationMap, stats ipamStats.InterfaceStats, err error) {
+	limits, limitsAvailable := n.getLimits()
+	if !limitsAvailable {
+		return nil, stats, fmt.Errorf(errUnableToDetermineLimits)
+	}
+
+	// During preparation of IP allocations, the primary NIC is not considered
+	// for allocation, so we don't need to consider it for capacity calculation.
+	stats.NodeCapacity = limits.IPv4 * (limits.Adapters - 1)
+
+	instanceID := n.node.InstanceID()
+	poolAvailable = map[ipam.Pool]ipamTypes.AllocationMap{}
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	n.enis = map[string]eniTypes.ENI{}
+	n.poolsEnis = map[ipam.Pool][]string{}
+	scopedLog.Infof("!!!!!!!!!!!!!!!!!! Do Resync nics and ips, instanceID is %s, limits: %+v, available is %t", instanceID, limits, limitsAvailable)
+
+	n.manager.ForeachInstance(instanceID,
+		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
+			e, ok := rev.Resource.(*eniTypes.ENI)
+			scopedLog.Infof("!!!!!!!!!!!! instance ENI is %+v, ok is %t", e, ok)
+			if !ok {
+				scopedLog.Infof("!!!!!!!!!!!! not here !!!!!!!!!!!")
+				return nil
+			}
+
+			n.enis[e.ID] = *e
+			if e.Pool == "" {
+				e.Pool = "default"
+			}
+
+			n.poolsEnis[ipam.Pool(e.Pool)] = append(n.poolsEnis[ipam.Pool(e.Pool)], e.ID)
+
+			if _, ok := poolAvailable[ipam.Pool(e.Pool)]; !ok {
+				poolAvailable[ipam.Pool(e.Pool)] = ipamTypes.AllocationMap{}
+			}
+
+			availableOnENI := math.IntMax(limits.IPv4-len(e.SecondaryIPSets), 0)
+			if availableOnENI > 0 {
+				stats.RemainingAvailableInterfaceCount++
+			}
+
+			for _, ip := range e.SecondaryIPSets {
+				poolAvailable[ipam.Pool(e.Pool)][ip.IpAddress] = ipamTypes.AllocationIP{Resource: e.ID}
+			}
+
+			return nil
+		})
+	enis := len(n.enis)
+
+	// An ECS instance has at least one ENI attached, no ENI found implies instance not found.
+	if enis == 0 {
+		scopedLog.Warning("Instance not found! Please delete corresponding ciliumnode if instance has already been deleted.")
+		return nil, stats, fmt.Errorf("unable to retrieve ENIs")
+	}
+
+	stats.RemainingAvailableInterfaceCount += limits.Adapters - len(n.enis)
+
+	scopedLog.Infof("!!!!!!!!!!!! ResyncInterfacesAndIPs result, remainAvailableENIsCount is %d, poolAvailable is %+v", stats.RemainingAvailableInterfaceCount, poolAvailable)
+	return poolAvailable, stats, nil
+}
+
+func (n *Node) AllocateStaticIP(ctx context.Context, address string, interfaceId string, pool ipam.Pool) error {
+	n.mutex.Lock()
+
+	defer n.mutex.Unlock()
+	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Allocate static IP.....")
+	err := n.manager.api.AssignStaticPrivateIPAddresses(ctx, interfaceId, address)
+	return err
+}
+
+func (n *Node) UntieStaticIP(ctx context.Context, release *ipam.ReleaseAction) error {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	log.Infof("@@@@@@@@@@@@@@@@@@@ Do Untie static IP.....")
+	err := n.manager.api.UnassignPrivateIPAddressesRetainPort(ctx, release.InterfaceID, release.IPsToRelease)
+	return err
 }

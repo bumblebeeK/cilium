@@ -566,6 +566,9 @@ func (d *Daemon) startIPAM() {
 	if d.ipamMetadata != nil {
 		d.ipam.WithMetadata(d.ipamMetadata)
 	}
+	if d.staticIPManager != nil {
+		d.ipam.WithStaticIPManager(d.staticIPManager)
+	}
 	bootstrapStats.ipam.End(true)
 }
 

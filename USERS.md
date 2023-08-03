@@ -3,7 +3,7 @@ Who is using Cilium?
 
 Sharing experiences and learning from other users is essential. We are
 frequently asked who is using a particular feature of Cilium so people can get in
-contact with other users to share experiences and best practices. People
+contact with other users to share experiences and best practices. People   
 also often want to know if product/platform X has integrated Cilium.
 While the [Cilium Slack community](https://cilium.herokuapp.com/) allows
 users to get in touch, it can be challenging to find this information quickly.

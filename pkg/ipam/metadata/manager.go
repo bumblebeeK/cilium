@@ -5,6 +5,7 @@ package metadata
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -134,4 +135,40 @@ func (m *Manager) GetIPPoolForPod(owner string) (pool string, err error) {
 
 	// Fallback to default pool
 	return ipamOption.PoolDefault, nil
+}
+
+func (m *Manager) GetIPPolicyForPod(owner string) (string, int, error) {
+	if m.namespaceStore == nil || m.podStore == nil {
+		return "", 0, &ManagerStoppedError{}
+	}
+
+	namespace, name, ok := splitK8sPodName(owner)
+	if !ok {
+		log.WithField("owner", owner).
+			Debug("IPAM metadata request for invalid pod name")
+		return "", 0, nil
+	}
+
+	// Check annotation on pod
+	pod, ok, err := m.podStore.GetByKey(resource.Key{
+		Name:      name,
+		Namespace: namespace,
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to lookup pod %q: %w", namespace+"/"+name, err)
+	} else if !ok {
+		return "", 0, &ResourceNotFound{Resource: "Pod", Namespace: namespace, Name: name}
+	} else if policy, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainKey]; hasAnnotation {
+		if t, hasAnnotation := pod.Annotations[annotation.IPAMIPPolicyRetainTime]; hasAnnotation {
+			time, err := strconv.Atoi(t)
+			if err != nil {
+				return policy, 0, nil
+			}
+			return policy, time, nil
+		} else {
+			return policy, 0, nil
+		}
+	}
+
+	return "", 0, nil
 }

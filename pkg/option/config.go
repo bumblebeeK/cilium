@@ -3706,7 +3706,7 @@ func (c *DaemonConfig) checkMapSizeLimits() error {
 
 func (c *DaemonConfig) checkIPv4NativeRoutingCIDR() error {
 	if c.GetIPv4NativeRoutingCIDR() == nil && c.EnableIPv4Masquerade && !c.TunnelingEnabled() &&
-		c.IPAMMode() != ipamOption.IPAMENI && c.EnableIPv4 && c.IPAMMode() != ipamOption.IPAMAlibabaCloud && c.IPAMMode() != ipamOption.IPAMOpenStack{
+		c.IPAMMode() != ipamOption.IPAMENI && c.EnableIPv4 && c.IPAMMode() != ipamOption.IPAMAlibabaCloud && c.IPAMMode() != ipamOption.IPAMOpenStack {
 		return fmt.Errorf(
 			"native routing cidr must be configured with option --%s "+
 				"in combination with --%s --%s=%s --%s=%s --%s=true",

@@ -69,6 +69,27 @@ func (in *ENI) DeepEqual(other *ENI) bool {
 		}
 	}
 
+	if ((in.Tags != nil) && (other.Tags != nil)) || ((in.Tags == nil) != (other.Tags == nil)) {
+		in, other := &in.Tags, &other.Tags
+		if other == nil {
+			return false
+		}
+
+		if len(*in) != len(*other) {
+			return false
+		} else {
+			for i, inElement := range *in {
+				if inElement != (*other)[i] {
+					return false
+				}
+			}
+		}
+	}
+
+	if in.Pool != other.Pool {
+		return false
+	}
+
 	return true
 }
 
@@ -136,9 +157,6 @@ func (in *Spec) DeepEqual(other *Spec) bool {
 	if in.VPCID != other.VPCID {
 		return false
 	}
-	if in.CIDR != other.CIDR {
-		return false
-	}
 	if ((in.SubnetIDs != nil) && (other.SubnetIDs != nil)) || ((in.SubnetIDs == nil) != (other.SubnetIDs == nil)) {
 		in, other := &in.SubnetIDs, &other.SubnetIDs
 		if other == nil {
@@ -195,6 +213,10 @@ func (in *Spec) DeepEqual(other *Spec) bool {
 				}
 			}
 		}
+	}
+
+	if in.CIDR != other.CIDR {
+		return false
 	}
 
 	return true

@@ -6,8 +6,9 @@ package eni
 import (
 	"context"
 	eniTypes "github.com/cilium/cilium/pkg/openstack/eni/types"
-	"github.com/sirupsen/logrus"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/ipam"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
@@ -23,38 +24,41 @@ type OpenStackAPI interface {
 	GetSubnets(ctx context.Context) (ipamTypes.SubnetMap, error)
 	GetVpcs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error)
 	GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap, error)
-	CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string) (string, *eniTypes.ENI, error)
+	CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool ipam.Pool) (string, *eniTypes.ENI, error)
 	DeleteNetworkInterface(ctx context.Context, eniID string) error
 	AttachNetworkInterface(ctx context.Context, instanceID, eniID string) error
+	DetachNetworkInterface(ctx context.Context, instanceID, eniID string) error
 	AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllocate int) ([]string, error)
 	UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string) error
+	UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID string, address []string) error
+	AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error
+	AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string) error
 }
 
 // InstancesManager maintains the list of instances. It must be kept up to date
 // by calling resync() regularly.
 type InstancesManager struct {
 	mutex          lock.RWMutex
-	resyncLock     lock.RWMutex
 	instances      *ipamTypes.InstanceMap
 	subnets        ipamTypes.SubnetMap
 	vpcs           ipamTypes.VirtualNetworkMap
 	securityGroups types.SecurityGroupMap
 	api            OpenStackAPI
+	excludeIPs     map[string]struct{}
 }
 
 func (m *InstancesManager) InstanceSync(ctx context.Context, instanceID string) time.Time {
 	// Instance incremental resync from different nodes should be executed in parallel,
 	// but must block the full API resync.
-	m.resyncLock.RLock()
-	defer m.resyncLock.RUnlock()
 	return m.resync(ctx, instanceID)
 }
 
 // NewInstancesManager returns a new instances manager
 func NewInstancesManager(api OpenStackAPI) *InstancesManager {
 	return &InstancesManager{
-		instances: ipamTypes.NewInstanceMap(),
-		api:       api,
+		instances:  ipamTypes.NewInstanceMap(),
+		api:        api,
+		excludeIPs: map[string]struct{}{},
 	}
 }
 
@@ -87,11 +91,7 @@ func (m *InstancesManager) GetPoolQuota() ipamTypes.PoolQuotaMap {
 // cache in the instanceManager. It returns the time when the resync has
 // started or time.Time{} if it did not complete.
 func (m *InstancesManager) Resync(ctx context.Context) time.Time {
-
 	// Full API resync should block the instance incremental resync from all nodes.
-	m.resyncLock.Lock()
-	defer m.resyncLock.Unlock()
-	// An empty instanceID indicates the full resync.
 	return m.resync(ctx, "")
 }
 
@@ -145,11 +145,14 @@ func (m *InstancesManager) FindSubnetByIDs(vpcID, availabilityZone string, subne
 	defer m.mutex.RUnlock()
 
 	var bestSubnet *ipamTypes.Subnet
+	log.Errorf("################ subnet ID is %s", subnetIDs[0])
 	for _, s := range m.subnets {
+		log.Errorf("################ subnet is %+v", s)
 		if s.VirtualNetworkID == vpcID {
 			for _, subnetID := range subnetIDs {
 				if s.ID == subnetID {
 					if bestSubnet == nil || bestSubnet.AvailableAddresses < s.AvailableAddresses {
+						log.Errorf("################ best subnet is %+v", s)
 						bestSubnet = s
 					}
 					continue
@@ -226,45 +229,29 @@ func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.T
 	// An empty instanceID indicates that this is full resync, ENIs from all instances
 	// will be refetched from ECS API and updated to the local cache. Otherwise only
 	// the given instance will be updated.
-	if instanceID == "" {
-		instances, err := m.api.GetInstances(ctx, vpcs, subnets)
-		if err != nil {
-			log.WithError(err).Warning("Unable to synchronize ECS interface list")
-			return time.Time{}
-		}
-
-		log.WithFields(logrus.Fields{
-			"numInstances":      instances.NumInstances(),
-			"numVPCs":           len(vpcs),
-			"numSubnets":        len(subnets),
-			"numSecurityGroups": len(securityGroups),
-		}).Info("Synchronized OpenStack ENI information")
-
-		m.mutex.Lock()
-		defer m.mutex.Unlock()
-		m.instances = instances
-	} else {
-		instance, err := m.api.GetInstance(ctx, vpcs, subnets, instanceID)
-		if err != nil {
-			log.WithError(err).Warning("Unable to synchronize ECS interface list")
-			return time.Time{}
-		}
-
-		log.WithFields(logrus.Fields{
-			"instance":          instance,
-			"numVPCs":           len(vpcs),
-			"numSubnets":        len(subnets),
-			"numSecurityGroups": len(securityGroups),
-		}).Info("Synchronized OpenStack ENI information for the corresponding instance")
-
-		m.mutex.Lock()
-		defer m.mutex.Unlock()
-		m.instances.UpdateInstance(instanceID, instance)
+	instances, err := m.api.GetInstances(ctx, vpcs, subnets)
+	if err != nil {
+		log.WithError(err).Warning("Unable to synchronize ECS interface list")
+		return time.Time{}
 	}
 
+	log.WithFields(logrus.Fields{
+		"numInstances":      instances.NumInstances(),
+		"numVPCs":           len(vpcs),
+		"numSubnets":        len(subnets),
+		"numSecurityGroups": len(securityGroups),
+	}).Info("Synchronized OpenStack ENI information")
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.instances = instances
 	m.subnets = subnets
 	m.vpcs = vpcs
 	m.securityGroups = securityGroups
-
 	return resyncStart
+}
+
+func (m *InstancesManager) excludeIP(ip string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.excludeIPs[ip] = struct{}{}
 }

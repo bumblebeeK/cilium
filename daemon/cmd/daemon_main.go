@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"github.com/cilium/cilium/pkg/ipam/staticip"
 	"os"
 	"path"
 	"path/filepath"
@@ -1620,6 +1621,7 @@ type daemonParams struct {
 	IPCache              *ipcache.IPCache
 	EgressGatewayManager *egressgateway.Manager
 	IPAMMetadataManager  *ipamMetadata.Manager
+	StaticIPManager      *staticip.Manager
 	CNIConfigManager     cni.CNIConfigManager
 	SwaggerSpec          *server.Spec
 	HealthAPISpec        *healthApi.Spec

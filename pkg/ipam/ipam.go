@@ -4,6 +4,7 @@
 package ipam
 
 import (
+	"github.com/cilium/cilium/pkg/ipam/staticip"
 	"net"
 
 	"github.com/sirupsen/logrus"
@@ -104,6 +105,7 @@ type MtuConfiguration interface {
 
 type Metadata interface {
 	GetIPPoolForPod(owner string) (pool string, err error)
+	GetIPPolicyForPod(owner string) (string, int, error)
 }
 
 // NewIPAM returns a new IP address manager
@@ -233,4 +235,9 @@ func PoolOrDefault(pool string) Pool {
 		return PoolDefault
 	}
 	return Pool(pool)
+}
+
+// WithStaticIPManager set
+func (ipam *IPAM) WithStaticIPManager(m *staticip.Manager) {
+	ipam.staticIPManager = m
 }

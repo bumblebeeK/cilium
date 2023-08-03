@@ -8,6 +8,7 @@ package ipam
 import (
 	"context"
 	"fmt"
+	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"sort"
 	"time"
 
@@ -55,7 +56,7 @@ type NodeOperations interface {
 	// (AllocationAction.EmptyInterfaceSlots > 0). This function must
 	// create the interface *and* allocate up to
 	// AllocationAction.MaxIPsToAllocate.
-	CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *logrus.Entry) (int, string, error)
+	CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *logrus.Entry, pool Pool) (int, string, error)
 
 	// ResyncInterfacesAndIPs is called to synchronize the latest list of
 	// interfaces and IPs associated with the node. This function is called
@@ -66,19 +67,21 @@ type NodeOperations interface {
 	// and error occurred during execution.
 	ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (ipamTypes.AllocationMap, ipamStats.InterfaceStats, error)
 
+	ResyncInterfacesAndIPsByPool(ctx context.Context, scopedLog *logrus.Entry) (poolAvailable map[Pool]ipamTypes.AllocationMap, stats ipamStats.InterfaceStats, err error)
+
 	// PrepareIPAllocation is called to calculate the number of IPs that
 	// can be allocated on the node and whether a new network interface
 	// must be attached to the node.
-	PrepareIPAllocation(scopedLog *logrus.Entry) (*AllocationAction, error)
+	PrepareIPAllocation(scopedLog *logrus.Entry, pool Pool) (*AllocationAction, error)
 
 	// AllocateIPs is called after invoking PrepareIPAllocation and needs
 	// to perform the actual allocation.
-	AllocateIPs(ctx context.Context, allocation *AllocationAction) error
+	AllocateIPs(ctx context.Context, allocation *AllocationAction, pool Pool) error
 
 	// PrepareIPRelease is called to calculate whether any IP excess needs
 	// to be resolved. It behaves identical to PrepareIPAllocation but
 	// indicates a need to release IPs.
-	PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ReleaseAction
+	PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry, pool Pool) *ReleaseAction
 
 	// ReleaseIPs is called after invoking PrepareIPRelease and needs to
 	// perform the release of IPs.
@@ -98,6 +101,12 @@ type NodeOperations interface {
 	// GetUsedIPWithPrefixes returns the total number of used IPs including all IPs in a prefix if at-least one of
 	// the prefix IPs is in use.
 	GetUsedIPWithPrefixes() int
+
+	GetPoolUsedIPWithPrefixes(pool string) int
+
+	AllocateStaticIP(ctx context.Context, address string, interfaceId string, pool Pool) error
+
+	UntieStaticIP(ctx context.Context, release *ReleaseAction) error
 }
 
 // AllocationImplementation is the interface an implementation must provide.
@@ -160,6 +169,8 @@ type MetricsNodeAPI interface {
 // nodeMap is a mapping of node names to ENI nodes
 type nodeMap map[string]*Node
 
+type poolMap map[string]*cilium_v2.CiliumPodIPPool
+
 // NodeManager manages all nodes with ENIs
 type NodeManager struct {
 	mutex              lock.RWMutex
@@ -171,6 +182,8 @@ type NodeManager struct {
 	releaseExcessIPs   bool
 	stableInstancesAPI bool
 	prefixDelegation   bool
+
+	pools poolMap
 }
 
 func (n *NodeManager) ClusterSizeDependantInterval(baseInterval time.Duration) time.Duration {
@@ -196,12 +209,13 @@ func NewNodeManager(instancesAPI AllocationImplementation, k8sAPI CiliumNodeGett
 		parallelWorkers:  parallelWorkers,
 		releaseExcessIPs: releaseExcessIPs,
 		prefixDelegation: prefixDelegation,
+		pools:            poolMap{},
 	}
 
 	// Assume readiness, the initial blocking resync in Start() will update
 	// the readiness
 	mngr.SetInstancesAPIReadiness(true)
-
+	k8sManager.nodeManager = mngr
 	return mngr, nil
 }
 
@@ -281,6 +295,8 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 			ipsMarkedForRelease: make(map[string]time.Time),
 			ipReleaseStatus:     make(map[string]string),
 			logLimiter:          logging.NewLimiter(10*time.Second, 3), // 1 log / 10 secs, burst of 3
+			pools:               map[Pool]pool{},
+			poolStats:           map[Pool]*Statistics{},
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -308,7 +324,7 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 			MinInterval:     10 * time.Millisecond,
 			MetricsObserver: n.metricsAPI.PoolMaintainerTrigger(),
 			TriggerFunc: func(reasons []string) {
-				if err := node.MaintainIPPool(ctx); err != nil {
+				if err := node.MaintainIPPoolV2(ctx); err != nil {
 					node.logger().WithError(err).Warning("Unable to maintain ip pool of node")
 					backoff.Wait(ctx)
 				}
@@ -338,7 +354,7 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 			MinInterval:     10 * time.Millisecond,
 			MetricsObserver: n.metricsAPI.K8sSyncTrigger(),
 			TriggerFunc: func(reasons []string) {
-				node.syncToAPIServer()
+				node.syncToAPIServerV2()
 			},
 		})
 		if err != nil {
@@ -371,6 +387,14 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 		node.k8sSync = k8sSync
 		n.nodes[node.name] = node
 		log.WithField(fieldName, resource.Name).Info("Discovered new CiliumNode custom resource")
+	}
+
+	err := n.SyncMultiPool(node)
+	if err != nil {
+		log.WithField(fieldName, resource.Name).Errorf("Synced multiPool failed: %s", err)
+	} else {
+		log.WithField(fieldName, resource.Name).Infof("Synced multiPool success")
+
 	}
 	n.mutex.Unlock()
 	node.UpdatedResource(resource)
@@ -520,7 +544,7 @@ func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time) {
 			continue
 		}
 		go func(node *Node, stats *resyncStats) {
-			n.resyncNode(ctx, node, stats, syncTime)
+			n.resyncNodeV2(ctx, node, stats, syncTime)
 			sem.Release(1)
 		}(node, &stats)
 	}
