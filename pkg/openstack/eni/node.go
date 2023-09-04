@@ -160,9 +160,9 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 	err = n.manager.api.AttachNetworkInterface(ctx, instanceID, eniID)
 	if err != nil {
-		err = n.manager.api.DeleteNetworkInterface(ctx, eniID)
-		if err != nil {
-			scopedLog.Errorf("Failed to release ENI after failure to attach, %s", err.Error())
+		err1 := n.manager.api.DeleteNetworkInterface(ctx, eniID)
+		if err1 != nil {
+			scopedLog.Errorf("Failed to release ENI after failure to attach, %s", err1.Error())
 		}
 		return 0, unableToAttachENI, fmt.Errorf("%s %s", errUnableToAttachENI, err)
 	}

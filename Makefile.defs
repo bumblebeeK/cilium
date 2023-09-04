@@ -144,7 +144,7 @@ GO_BUILD_FLAGS += -mod=vendor
 GO_TEST_FLAGS += -mod=vendor
 GO_CLEAN_FLAGS += -mod=vendor
 
-GO_BUILD = CGO_ENABLED=0 $(GO) build
+GO_BUILD = CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build
 
 # Support CGO cross-compiling for amd64 and arm64 targets
 CGO_CC =
