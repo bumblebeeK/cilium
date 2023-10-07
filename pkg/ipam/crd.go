@@ -361,10 +361,9 @@ func (n *nodeStore) hasMinimumIPsInPool() (minimumReached bool, required, numAva
 
 			if len(n.ownNode.Spec.IPAM.CrdPools) > 0 {
 				poolMinimumReached := true
-				for _, pool := range n.ownNode.Spec.IPAM.CrdPools {
-					if len(pool) < required {
-						poolMinimumReached = false
-					}
+				defaultPool, exist := n.ownNode.Spec.IPAM.CrdPools[string(PoolDefault)]
+				if !exist || len(defaultPool) < required {
+					poolMinimumReached = false
 				}
 				if poolMinimumReached {
 					minimumReached = true
