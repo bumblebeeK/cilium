@@ -14,8 +14,11 @@ gops_version="v0.3.27"
 mkdir -p /go/src/github.com/google
 cd /go/src/github.com/google
 
-git clone https://github.com/google/gops.git
+export https_proxy=http://172.17.0.1:7890 http_proxy=http://172.17.0.1:7890 all_proxy=socks5://172.17.0.1:7890 && git clone https://github.com/google/gops.git
 cd gops
+
+go env -w GOPROXY=https://goproxy.io,direct
+
 
 git checkout -b "${gops_version}" "${gops_version}"
 git --no-pager remote -v

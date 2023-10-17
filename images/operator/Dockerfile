@@ -19,7 +19,7 @@ ARG NOSTRIP
 ARG NOOPT
 ARG LOCKDEBUG
 ARG RACE
-ARG OPERATOR_VARIANT
+ARG OPERATOR_VARIANT=operator-openstack
 
 WORKDIR /go/src/github.com/cilium/cilium
 
@@ -40,16 +40,15 @@ RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium \
 # Represents the plataform where the build is happening, do not mix with
 # TARGETARCH
 FROM --platform=${BUILDPLATFORM} ${ALPINE_IMAGE} as certs
-RUN apk --update add ca-certificates
+RUN export https_proxy=http://172.17.0.1:7890 http_proxy=http://172.17.0.1:7890 all_proxy=socks5://172.17.0.1:7890 && apk --update add ca-certificates
 
 # BUILDPLATFORM is an automatic platform ARG enabled by Docker BuildKit.
 # Represents the plataform where the build is happening, do not mix with
 # TARGETARCH
 FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} as gops
-
 # build-gops.sh will build both archs at the same time
 WORKDIR /go/src/github.com/cilium/cilium/images/runtime
-RUN apt-get update && apt-get install -y binutils-aarch64-linux-gnu binutils-x86-64-linux-gnu
+RUN export https_proxy=http://172.17.0.1:7890 http_proxy=http://172.17.0.1:7890 all_proxy=socks5://172.17.0.1:7890 &&  apt-get update && apt-get install -y binutils-aarch64-linux-gnu binutils-x86-64-linux-gnu
 RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium \
     --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/go/pkg \
@@ -60,7 +59,7 @@ FROM ${BASE_IMAGE} as release
 ARG TARGETOS
 # TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
 ARG TARGETARCH
-ARG OPERATOR_VARIANT
+ARG OPERATOR_VARIANT=operator-openstack
 LABEL maintainer="maintainer@cilium.io"
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=gops /out/${TARGETOS}/${TARGETARCH}/bin/gops /bin/gops
@@ -85,7 +84,7 @@ FROM release as debug
 ARG TARGETOS
 # TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
 ARG TARGETARCH
-ARG OPERATOR_VARIANT
+ARG OPERATOR_VARIANT=operator-openstack
 ARG DEBUG_HOLD
 ENV DEBUG_PORT=2346
 ENV DEBUG_HOLD=${DEBUG_HOLD}
