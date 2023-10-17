@@ -145,7 +145,7 @@ func poolsInit(poolGetter v2alpha12.CiliumPodIPPoolsGetter, stopCh <-chan struct
 				deletePool(obj)
 			},
 		},
-		transformToPool,
+		nil,
 	)
 	go func() {
 		poolController.Run(stopCh)
@@ -178,7 +178,7 @@ func staticIPInit(ipGetter v2alpha12.CiliumStaticIPsGetter, stopCh <-chan struct
 				k8sManager.updateStaticIP(ipCrd)
 			},
 		},
-		transformToStaticIP,
+		nil,
 	)
 	go func() {
 		staticIPController.Run(stopCh)
@@ -259,6 +259,8 @@ func (extraManager) LabelNodeWithPool(nodeName string, labels map[string]string)
 	if err != nil {
 		return err
 	}
+
+	oldNode = oldNode.DeepCopy()
 	oldLabel := oldNode.GetLabels()
 
 	// remove all the old pool label
@@ -801,7 +803,6 @@ func updatePool(obj interface{}) {
 	if !exists {
 		return
 	}
-
 	k8sManager.nodeManager.pools[key] = p.(*v2alpha1.CiliumPodIPPool)
 }
 
