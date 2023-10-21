@@ -194,6 +194,11 @@ func (n *nodeOperationsMock) ReleaseIPs(ctx context.Context, release *ReleaseAct
 	return nil
 }
 
+func (m *nodeOperationsMock) InstanceSync(ctx context.Context, instanceID string) time.Time {
+	log.Errorf("InstanceSync function for Alibaba ENI is not supported.")
+	return time.Time{}
+}
+
 func (n *nodeOperationsMock) GetMaximumAllocatableIPv4() int {
 	return 0
 }

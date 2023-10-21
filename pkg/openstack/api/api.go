@@ -229,6 +229,38 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
 	return instances, nil
 }
 
+func (c *Client) GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceID string) (instance *ipamTypes.Instance, err error) {
+	log.Errorf("######## Do Get instance, id is %s", instanceID)
+
+	instance = &ipamTypes.Instance{}
+	instance.Interfaces = map[string]ipamTypes.InterfaceRevision{}
+	var networkInterfaces []ports.Port
+
+	networkInterfaces, err = c.describeNetworkInterfacesByInstance(instanceID)
+	if err != nil {
+		return instance, err
+	}
+
+	for _, iface := range networkInterfaces {
+		if !strings.HasPrefix(iface.DeviceOwner, VMDeviceOwner) {
+			continue
+		}
+		log.Errorf("######## networkInterface is %+v", iface)
+		ifId, eni, err := parseENI(&iface, subnets)
+		if err != nil {
+			log.Errorf("######## Failed to pares eni %+v, with error %s", iface, err)
+			continue
+		}
+
+		instance.Interfaces[ifId] = ipamTypes.InterfaceRevision{
+			Resource: eni,
+		}
+	}
+	log.Errorf("######## Update instances, instanceID is %s, iface is: %+v", instanceID, instance.Interfaces)
+
+	return
+}
+
 // GetVpcs retrieves and returns all Vpcs
 func (c *Client) GetVpcs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error) {
 	vpcs := ipamTypes.VirtualNetworkMap{}
@@ -659,6 +691,28 @@ func validIPAddress(ipStr string, cidr *net.IPNet) bool {
 		}
 	}
 	return false
+}
+
+// describeNetworkInterfacesByInstance lists all ENIs by instance
+func (c *Client) describeNetworkInterfacesByInstance(instanceID string) ([]ports.Port, error) {
+	var result []ports.Port
+	var err error
+
+	opts := ports.ListOpts{
+		ProjectID: c.filters[ProjectID],
+		DeviceID:  instanceID,
+	}
+
+	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
+		result, err = ports.ExtractPorts(page)
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
+	})
+
+	return result, nil
 }
 
 // describeNetworkInterfaces lists all ENIs
