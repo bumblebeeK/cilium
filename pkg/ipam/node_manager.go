@@ -138,6 +138,8 @@ type AllocationImplementation interface {
 	// also called when the IPAM layer detects that state got out of sync.
 	Resync(ctx context.Context) time.Time
 
+	InstanceSync(ctx context.Context, instanceID string) time.Time
+
 	// HasInstance returns whether the instance is in instances
 	HasInstance(instanceID string) bool
 
@@ -396,6 +398,24 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 			node.logger().WithError(err).Error("Unable to create k8s-sync trigger")
 			return
 		}
+
+		instanceSync, err := trigger.NewTrigger(trigger.Parameters{
+			Name:            fmt.Sprintf("ipam-node-instance-sync-%s", resource.Name),
+			MinInterval:     10 * time.Millisecond,
+			MetricsObserver: n.metricsAPI.ResyncTrigger(),
+			TriggerFunc: func(reasons []string) {
+				if syncTime, ok := node.instanceAPISync(ctx, resource.InstanceID()); ok {
+					node.manager.Resync(ctx, syncTime)
+				}
+			},
+		})
+		if err != nil {
+			poolMaintainer.Shutdown()
+			k8sSync.Shutdown()
+			node.logger().WithError(err).Error("Unable to create instance-sync trigger")
+			return
+		}
+		node.instanceSync = instanceSync
 
 		node.poolMaintainer = poolMaintainer
 		node.k8sSync = k8sSync
