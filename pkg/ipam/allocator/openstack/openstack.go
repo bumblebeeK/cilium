@@ -58,15 +58,18 @@ func (a *AllocatorOpenStack) Start(ctx context.Context, getterUpdater ipam.Ciliu
 	var iMetrics ipam.MetricsAPI
 
 	log.Info("Starting OpenStack ENI allocator...")
-
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 6")
 	if operatorOption.Config.EnableMetrics {
 		iMetrics = ipamMetrics.NewPrometheusMetrics(operatorMetrics.Namespace, operatorMetrics.Registry)
 	} else {
 		iMetrics = &ipamMetrics.NoOpMetrics{}
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 7")
 	instances := eni.NewInstancesManager(a.client)
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 8")
 	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics,
 		operatorOption.Config.ParallelAllocWorkers, operatorOption.Config.OpenStackReleaseExcessIPs, false)
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 9")
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize openstack node manager: %w", err)
 	}
@@ -74,6 +77,7 @@ func (a *AllocatorOpenStack) Start(ctx context.Context, getterUpdater ipam.Ciliu
 	if err := nodeManager.Start(ctx); err != nil {
 		return nil, err
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 10")
 
 	return nodeManager, nil
 }

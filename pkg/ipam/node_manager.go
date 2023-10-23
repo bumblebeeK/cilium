@@ -190,7 +190,6 @@ type NodeManager struct {
 	instancesAPI       AllocationImplementation
 	k8sAPI             CiliumNodeGetterUpdater
 	metricsAPI         MetricsAPI
-	resyncTrigger      *trigger.Trigger
 	parallelWorkers    int64
 	releaseExcessIPs   bool
 	stableInstancesAPI bool
@@ -225,21 +224,6 @@ func NewNodeManager(instancesAPI AllocationImplementation, k8sAPI CiliumNodeGett
 		pools:            poolMap{},
 	}
 
-	resyncTrigger, err := trigger.NewTrigger(trigger.Parameters{
-		Name:            "ipam-node-manager-resync",
-		MinInterval:     10 * time.Millisecond,
-		MetricsObserver: metrics.ResyncTrigger(),
-		TriggerFunc: func(reasons []string) {
-			if syncTime, ok := mngr.instancesAPIResync(context.TODO()); ok {
-				mngr.Resync(context.TODO(), syncTime)
-			}
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("unable to initialize resync trigger: %s", err)
-	}
-
-	mngr.resyncTrigger = resyncTrigger
 	// Assume readiness, the initial blocking resync in Start() will update
 	// the readiness
 	mngr.SetInstancesAPIReadiness(true)
@@ -263,6 +247,8 @@ func (n *NodeManager) Start(ctx context.Context) error {
 		return fmt.Errorf("Initial synchronization with instances API failed")
 	}
 
+	log.Infoln("@@@@@ NodeManager instancesAPIResync finished")
+
 	// Start an interval based  background resync for safety, it will
 	// synchronize the state regularly and resolve eventual deficit if the
 	// event driven trigger fails, and also release excess IP addresses
@@ -274,7 +260,7 @@ func (n *NodeManager) Start(ctx context.Context) error {
 				RunInterval: time.Minute,
 				DoFunc: func(ctx context.Context) error {
 					if syncTime, ok := n.instancesAPIResync(ctx); ok {
-						n.Resync(ctx, syncTime)
+						n.Resync(ctx, syncTime, "")
 
 						for _, node := range n.nodes {
 							err := n.SyncMultiPool(node)
@@ -340,7 +326,7 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 		ctx, cancel := context.WithCancel(context.Background())
 		// InstanceAPI is stale and the instances API is stable then do resync instancesAPI to sync instances
 		if !n.instancesAPI.HasInstance(resource.InstanceID()) && n.stableInstancesAPI {
-			if syncTime := n.instancesAPI.Resync(ctx); syncTime.IsZero() {
+			if syncTime := n.instancesAPI.InstanceSync(ctx, resource.InstanceID()); syncTime.IsZero() {
 				node.logger().Warning("Failed to resync the instances from the API after new node was found")
 				n.stableInstancesAPI = false
 			} else {
@@ -405,7 +391,7 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 			MetricsObserver: n.metricsAPI.ResyncTrigger(),
 			TriggerFunc: func(reasons []string) {
 				if syncTime, ok := node.instanceAPISync(ctx, resource.InstanceID()); ok {
-					node.manager.Resync(ctx, syncTime)
+					node.manager.Resync(ctx, syncTime, resource.Name)
 				}
 			},
 		})
@@ -549,7 +535,7 @@ func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncS
 	}
 
 	stats.mutex.Unlock()
-
+	log.Infoln("@@@@@@ resyncNode %s finished", node.name)
 	node.k8sSync.Trigger()
 }
 
@@ -557,41 +543,49 @@ func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncS
 // attendance is defined by the number of IPs needed to reach the configured
 // watermarks. Any updates to the node resource are synchronized to the
 // Kubernetes apiserver.
-func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time) {
+func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time, nodeName string) {
 	n.metricsAPI.IncResyncCount()
 
 	stats := resyncStats{}
-	sem := semaphore.NewWeighted(n.parallelWorkers)
+	if nodeName == "" {
+		sem := semaphore.NewWeighted(n.parallelWorkers)
 
-	for _, node := range n.GetNodesByIPWatermark() {
-		log.Infof("!!!!!!!!!!!!! node details is %+v", node)
-		err := sem.Acquire(ctx, 1)
-		if err != nil {
-			continue
+		for _, node := range n.GetNodesByIPWatermark() {
+			log.Infof("!!!!!!!!!!!!! node details is %+v", node)
+			err := sem.Acquire(ctx, 1)
+			if err != nil {
+				continue
+			}
+			go func(node *Node, stats *resyncStats) {
+				n.resyncNode(ctx, node, stats, syncTime)
+				sem.Release(1)
+			}(node, &stats)
 		}
-		go func(node *Node, stats *resyncStats) {
-			n.resyncNode(ctx, node, stats, syncTime)
-			sem.Release(1)
-		}(node, &stats)
+
+		// Acquire the full semaphore, this requires all goroutines to
+		// complete and thus blocks until all nodes are synced
+		sem.Acquire(ctx, n.parallelWorkers)
+
+		n.metricsAPI.SetAllocatedIPs("used", stats.totalUsed)
+		n.metricsAPI.SetAllocatedIPs("available", stats.totalAvailable)
+		n.metricsAPI.SetAllocatedIPs("needed", stats.totalNeeded)
+		n.metricsAPI.SetAvailableInterfaces(stats.remainingInterfaces)
+		n.metricsAPI.SetInterfaceCandidates(stats.interfaceCandidates)
+		n.metricsAPI.SetEmptyInterfaceSlots(stats.emptyInterfaceSlots)
+		n.metricsAPI.SetNodes("total", stats.nodes)
+		n.metricsAPI.SetNodes("in-deficit", stats.nodesInDeficit)
+		n.metricsAPI.SetNodes("at-capacity", stats.nodesAtCapacity)
+
+		for poolID, quota := range n.instancesAPI.GetPoolQuota() {
+			n.metricsAPI.SetAvailableIPsPerSubnet(string(poolID), quota.AvailabilityZone, quota.AvailableIPs)
+		}
+	} else {
+		node := n.Get(nodeName)
+		if node != nil {
+			n.resyncNode(ctx, node, &stats, syncTime)
+		}
 	}
 
-	// Acquire the full semaphore, this requires all goroutines to
-	// complete and thus blocks until all nodes are synced
-	sem.Acquire(ctx, n.parallelWorkers)
-
-	n.metricsAPI.SetAllocatedIPs("used", stats.totalUsed)
-	n.metricsAPI.SetAllocatedIPs("available", stats.totalAvailable)
-	n.metricsAPI.SetAllocatedIPs("needed", stats.totalNeeded)
-	n.metricsAPI.SetAvailableInterfaces(stats.remainingInterfaces)
-	n.metricsAPI.SetInterfaceCandidates(stats.interfaceCandidates)
-	n.metricsAPI.SetEmptyInterfaceSlots(stats.emptyInterfaceSlots)
-	n.metricsAPI.SetNodes("total", stats.nodes)
-	n.metricsAPI.SetNodes("in-deficit", stats.nodesInDeficit)
-	n.metricsAPI.SetNodes("at-capacity", stats.nodesAtCapacity)
-
-	for poolID, quota := range n.instancesAPI.GetPoolQuota() {
-		n.metricsAPI.SetAvailableIPsPerSubnet(string(poolID), quota.AvailabilityZone, quota.AvailableIPs)
-	}
 }
 
 // SyncMultiPool labels the node with "openstack-ip-pool" when a ciliumNode upsert or a k8s node's pool annotation changed

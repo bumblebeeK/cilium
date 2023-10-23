@@ -95,17 +95,30 @@ type extraOperation interface {
 
 func InitIPAMOpenStackExtra(slimClient slimclientset.Interface, alphaClient v2alpha12.CiliumV2alpha1Interface, stopCh <-chan struct{}) {
 	multiPoolExtraInit.Do(func() {
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 1")
 
 		nodesInit(slimClient, stopCh)
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 2")
+
 		poolsInit(alphaClient, stopCh)
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 3")
 
 		k8sManager.client = slimClient
 		k8sManager.alphaClient = alphaClient
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 4")
+
 		staticIPInit(alphaClient, stopCh)
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 5")
 
 		k8sManager.updateCiliumNodeManagerPool()
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 6")
+
 		k8sManager.apiReady = true
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 7")
+
 		close(multiPoolExtraSynced)
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start1 8")
+
 	})
 
 }
@@ -116,17 +129,7 @@ func nodesInit(slimClient slimclientset.Interface, stopCh <-chan struct{}) {
 		utils.ListerWatcherFromTyped[*slim_corev1.NodeList](slimClient.CoreV1().Nodes()),
 		&slim_corev1.Node{},
 		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				updateNode(obj)
-			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				// little optimize for invoke updateNode
-				if compareNodeAnnotationAndLabelChange(oldObj, newObj) {
-					updateNode(newObj)
-				}
-			},
-		},
+		cache.ResourceEventHandlerFuncs{},
 		transformToNode,
 	)
 	go func() {
@@ -716,24 +719,6 @@ func addPool(obj interface{}) {
 func deletePool(obj interface{}) {
 	key, _ := queueKeyFunc(obj)
 	delete(k8sManager.nodeManager.pools, key)
-}
-
-func updateNode(obj interface{}) {
-	key, _ := queueKeyFunc(obj)
-	var retryCount int
-loop:
-	node, ok := k8sManager.nodeManager.nodes[key]
-	if !ok && retryCount < 3 {
-		<-time.After(1 * time.Second)
-		retryCount++
-		goto loop
-	}
-	if ok {
-		err := k8sManager.nodeManager.SyncMultiPool(node)
-		if err != nil {
-			log.Error(err)
-		}
-	}
 }
 
 func (extraManager) CreateDefaultPool(subnets ipamTypes.SubnetMap) {

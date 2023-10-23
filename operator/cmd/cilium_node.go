@@ -70,6 +70,7 @@ func newCiliumNodeSynchronizer(clientset k8sClient.Clientset, nodeManager alloca
 }
 
 func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) error {
+	log.Infoln("@@@@@@@ ciliumNodeSynchronizer start")
 	var (
 		ciliumNodeKVStore      *store.SharedStore
 		err                    error
@@ -86,6 +87,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 	// KVStore is enabled -> we will run the event handler to sync objects into
 	// KVStore.
 	if s.withKVStore {
+		log.Infoln("@@@@@@ ciliumNodeSynchronizer withKVStore")
 		// Connect to the KVStore asynchronously so that we are able to start
 		// the operator without relying on the KVStore to be up.
 		// Start a goroutine to GC all CiliumNodes from the KVStore that are
@@ -138,6 +140,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 	}
 
 	if s.nodeManager != nil {
+		log.Infoln("@@@@ s.nodeManager yes")
 		nodeManagerSyncHandler = s.syncHandlerConstructor(
 			func(node *cilium_v2.CiliumNode) {
 				s.nodeManager.Delete(node)
@@ -149,6 +152,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 	}
 
 	if s.withKVStore {
+		log.Infoln("@@@@ s.withKVStore yes")
 		kvStoreSyncHandler = s.syncHandlerConstructor(
 			func(node *cilium_v2.CiliumNode) {
 				nodeDel := ciliumNodeName{
@@ -163,11 +167,14 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 			})
 	}
 
+	log.Infoln("@@@@@ s.withKVStore step 1")
+
 	// If both nodeManager and KVStore are nil, then we don't need to handle
 	// any watcher events, but we will need to keep all CiliumNodes in
 	// memory because 'ciliumNodeStore' is used across the operator
 	// to get the latest state of a CiliumNode.
 	if s.withKVStore || s.nodeManager != nil {
+		log.Infoln("@@@@@ s.withKVStore step 2")
 		resourceEventHandler = cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -250,6 +257,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 		// then there isn't any event handler set for CiliumNodes events.
 		if nodeManagerSyncHandler != nil {
 			go func() {
+				log.Infoln("@@@@@@ processNextWorkItem")
 				// infinite loop. run in a goroutine to unblock code execution
 				for s.processNextWorkItem(ciliumNodeManagerQueue, nodeManagerSyncHandler) {
 				}

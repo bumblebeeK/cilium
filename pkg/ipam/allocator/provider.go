@@ -22,5 +22,5 @@ type AllocatorProvider interface {
 type NodeEventHandler interface {
 	Upsert(resource *v2.CiliumNode)
 	Delete(resource *v2.CiliumNode)
-	Resync(context.Context, time.Time)
+	Resync(context.Context, time.Time, string)
 }

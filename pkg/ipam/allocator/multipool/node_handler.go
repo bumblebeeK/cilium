@@ -63,7 +63,7 @@ func (n *NodeHandler) Delete(resource *v2.CiliumNode) {
 	n.controllerManager.RemoveController(controllerName(resource.Name))
 }
 
-func (n *NodeHandler) Resync(context.Context, time.Time) {
+func (n *NodeHandler) Resync(context.Context, time.Time, string) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 

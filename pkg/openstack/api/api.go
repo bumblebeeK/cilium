@@ -699,8 +699,9 @@ func (c *Client) describeNetworkInterfacesByInstance(instanceID string) ([]ports
 	var err error
 
 	opts := ports.ListOpts{
-		ProjectID: c.filters[ProjectID],
-		DeviceID:  instanceID,
+		ProjectID:   c.filters[ProjectID],
+		DeviceID:    instanceID,
+		DeviceOwner: "compute:default-az",
 	}
 
 	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
@@ -721,7 +722,8 @@ func (c *Client) describeNetworkInterfaces() ([]ports.Port, error) {
 	var err error
 
 	opts := ports.ListOpts{
-		ProjectID: c.filters[ProjectID],
+		ProjectID:   c.filters[ProjectID],
+		DeviceOwner: "compute:default-az",
 	}
 
 	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {

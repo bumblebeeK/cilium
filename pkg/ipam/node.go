@@ -1038,6 +1038,7 @@ func (n *Node) MaintainIPPool(ctx context.Context) error {
 		}
 	}
 	n.recalculate()
+	log.Infof("MaintainIPPool completed instanceMutated=%v, node is %s, pool is %+v", instanceMutated, n.name, n.pools)
 
 	if instanceMutated || err != nil {
 		n.instanceSync.Trigger()
@@ -1078,6 +1079,7 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 // To initialize, or seed, the CiliumNode resource, the PreAllocate field is
 // populated with a default value and then is adjusted as necessary.
 func (n *Node) syncToAPIServer() (err error) {
+	log.Infoln("@@@@@node %s syncToAPIServer", n.name)
 	scopedLog := n.logger()
 	scopedLog.Debug("Refreshing node")
 

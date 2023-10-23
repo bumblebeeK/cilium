@@ -414,7 +414,7 @@ func (n *NodesPodCIDRManager) Delete(node *v2.CiliumNode) {
 }
 
 // Resync resyncs the nodes with k8s.
-func (n *NodesPodCIDRManager) Resync(context.Context, time.Time) {
+func (n *NodesPodCIDRManager) Resync(context.Context, time.Time, string) {
 	n.Mutex.Lock()
 	if !n.canAllocatePodCIDRs {
 		n.canAllocatePodCIDRs = true

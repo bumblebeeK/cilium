@@ -428,6 +428,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 	} else if option.Config.DisableCiliumEndpointCRD {
 		log.Infof("KubeDNS unmanaged pods controller disabled as %q option is set to 'disabled' in Cilium ConfigMap", option.DisableCiliumEndpointCRDName)
 	} else if operatorOption.Config.UnmanagedPodWatcherInterval != 0 {
+		log.Infoln("@@@@@@@@@ UnmanagedPodWatcherInterval")
 		legacy.wg.Add(1)
 		go func() {
 			defer legacy.wg.Done()
@@ -442,6 +443,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 	)
 
 	log.WithField(logfields.Mode, option.Config.IPAM).Info("Initializing IPAM")
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start")
 
 	switch ipamMode := option.Config.IPAM; ipamMode {
 	case ipamOption.IPAMAzure,
@@ -455,20 +457,25 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 		if !providerBuiltin {
 			log.Fatalf("%s allocator is not supported by this version of %s", ipamMode, binaryName)
 		}
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 1")
 
 		if err := alloc.Init(legacy.ctx); err != nil {
 			log.WithError(err).Fatalf("Unable to init %s allocator", ipamMode)
 		}
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 2")
 
 		if pooledAlloc, ok := alloc.(operatorWatchers.PooledAllocatorProvider); ok {
 			// The following operation will block until all pools are restored, thus it
 			// is safe to continue starting node allocation right after return.
 			operatorWatchers.StartIPPoolAllocator(legacy.ctx, legacy.clientset, pooledAlloc, legacy.resources.CiliumPodIPPools)
 		}
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 3")
 
 		nm, err := alloc.Start(legacy.ctx, &ciliumNodeUpdateImplementation{legacy.clientset})
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 4")
 
 		ipam.InitIPAMOpenStackExtra(legacy.clientset.Slim(), legacy.clientset.CiliumV2alpha1(), legacy.ctx.Done())
+		log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM start 5")
 
 		if err != nil {
 			log.WithError(err).Fatalf("Unable to start %s allocator", ipamMode)
@@ -476,11 +483,13 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 
 		nodeManager = nm
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   IPAM end")
 
 	if operatorOption.Config.BGPAnnounceLBIP {
 		log.Info("Starting LB IP allocator")
 		operatorWatchers.StartBGPBetaLBIPAllocator(legacy.ctx, legacy.clientset, legacy.resources.Services)
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   StartBGPBetaLBIPAllocator end")
 
 	if kvstoreEnabled() {
 		var goopts *kvstore.ExtraOptions
@@ -577,6 +586,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 
 		startKvstoreWatchdog()
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   startKvstoreWatchdog end")
 
 	if legacy.clientset.IsEnabled() &&
 		(operatorOption.Config.RemoveCiliumNodeTaints || operatorOption.Config.SetCiliumIsUpCondition) {
@@ -590,8 +600,10 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 
 		operatorWatchers.HandleNodeTolerationAndTaints(&legacy.wg, legacy.clientset, legacy.ctx.Done())
 	}
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   HandleNodeTolerationAndTaints end")
 
 	ciliumNodeSynchronizer := newCiliumNodeSynchronizer(legacy.clientset, nodeManager, withKVStore)
+	log.Infoln("@@@@@@@@@@@@@@@@@@@@@@@@@   newCiliumNodeSynchronizer end")
 
 	if legacy.clientset.IsEnabled() {
 		if err := ciliumNodeSynchronizer.Start(legacy.ctx, &legacy.wg); err != nil {
@@ -638,7 +650,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
 		// knows all podCIDRs that are currently set in the cluster, that
 		// it can allocate podCIDRs for the nodes that don't have a podCIDR
 		// set.
-		nodeManager.Resync(legacy.ctx, time.Time{})
+		nodeManager.Resync(legacy.ctx, time.Time{}, "")
 	}
 
 	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD {
