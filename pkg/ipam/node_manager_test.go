@@ -39,6 +39,11 @@ type allocationImplementationMock struct {
 	ipGenerator  int
 }
 
+func (a *allocationImplementationMock) InstanceSync(ctx context.Context, instanceID string) time.Time {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (a *allocationImplementationMock) ExcludeIP(ip string) {
 	//TODO implement me
 	panic("implement me")
@@ -99,7 +104,7 @@ func (n *nodeOperationsMock) AllocateStaticIP(ctx context.Context, address strin
 	panic("implement me")
 }
 
-func (n *nodeOperationsMock) UnbindStaticIP(ctx context.Context, release *ReleaseAction, pool string) error {
+func (n *nodeOperationsMock) UnbindStaticIP(ctx context.Context, address string, pool string) error {
 	//TODO implement me
 	panic("implement me")
 }
@@ -492,19 +497,19 @@ func (e *IPAMSuite) TestNodeManagerReleaseAddress(c *check.C) {
 	// Trigger resync manually, excess IPs should be released down to 18
 	// (10 used + 4 prealloc + 4 max-above-watermark)
 	// Excess timestamps should be registered after this trigger
-	mngr.resyncTrigger.Trigger()
+	node.instanceSync.Trigger()
 
 	// Acknowledge release IPs after 3 secs
 	time.AfterFunc(3*time.Second, func() {
 		// Excess delay duration should have elapsed by now, trigger resync again.
 		// IPs should be marked as excess
-		mngr.resyncTrigger.Trigger()
+		node.instanceSync.Trigger()
 		time.Sleep(1 * time.Second)
 		node.PopulateIPReleaseStatus(node.resource)
 		// Fake acknowledge IPs for release like agent would.
 		testutils.FakeAcknowledgeReleaseIps(node.resource)
 		// Resync one more time to process acknowledgements.
-		mngr.resyncTrigger.Trigger()
+		node.instanceSync.Trigger()
 	})
 
 	c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node3", 0) }, 5*time.Second), check.IsNil)
@@ -551,7 +556,7 @@ func (e *IPAMSuite) TestNodeManagerAbortRelease(c *check.C) {
 
 	// Trigger resync manually, excess IPs should be released down to 3
 	// Excess timestamps should be registered after this trigger
-	mngr.resyncTrigger.Trigger()
+	node.instanceSync.Trigger()
 	wg.Add(1)
 
 	// Acknowledge release IPs after 3 secs
@@ -559,7 +564,7 @@ func (e *IPAMSuite) TestNodeManagerAbortRelease(c *check.C) {
 		defer wg.Done()
 		// Excess delay duration should have elapsed by now, trigger resync again.
 		// IPs should be marked as excess
-		mngr.resyncTrigger.Trigger()
+		node.instanceSync.Trigger()
 		time.Sleep(1 * time.Second)
 		node.PopulateIPReleaseStatus(node.resource)
 
@@ -572,7 +577,7 @@ func (e *IPAMSuite) TestNodeManagerAbortRelease(c *check.C) {
 		mngr.Upsert(updateCiliumNode(node.resource, 3))
 		node.poolMaintainer.Trigger()
 		// Resync one more time to process acknowledgements.
-		mngr.resyncTrigger.Trigger()
+		node.instanceSync.Trigger()
 
 		time.Sleep(1 * time.Second)
 		node.PopulateIPReleaseStatus(node.resource)
@@ -635,7 +640,7 @@ func (e *IPAMSuite) TestNodeManagerManyNodes(c *check.C) {
 	// The above check returns as soon as the address requirements are met.
 	// The metrics may still be oudated, resync all nodes to update
 	// metrics.
-	mngr.Resync(context.TODO(), time.Now())
+	mngr.Resync(context.TODO(), time.Now(), "")
 
 	c.Assert(metricsapi.Nodes("total"), check.Equals, numNodes)
 	c.Assert(metricsapi.Nodes("in-deficit"), check.Equals, 0)

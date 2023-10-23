@@ -14,6 +14,9 @@ gops_version="v0.3.27"
 mkdir -p /go/src/github.com/google
 cd /go/src/github.com/google
 
+git config --global http.https://github.com.proxy socks5://192.168.0.135:7890
+
+
 
 
 git clone https://github.com/google/gops.git

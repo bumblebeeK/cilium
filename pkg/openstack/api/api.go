@@ -54,7 +54,8 @@ const (
 )
 
 const (
-	PortNotFoundErr = "port not found"
+	PortNotFoundErr     = "port not found"
+	AllocateStaticIPErr = "ip has already mount on eni"
 )
 
 var maxAttachRetries = wait.Backoff{
@@ -561,6 +562,7 @@ func (c Client) getPortFromIP(netID, ip string) (*ports.Port, error) {
 
 	opts := ports.ListOpts{
 		NetworkID: netID,
+		ProjectID: c.filters[ProjectID],
 		FixedIPs: []ports.FixedIPOpts{
 			ports.FixedIPOpts{
 				IPAddress: ip,
@@ -699,9 +701,8 @@ func (c *Client) describeNetworkInterfacesByInstance(instanceID string) ([]ports
 	var err error
 
 	opts := ports.ListOpts{
-		ProjectID:   c.filters[ProjectID],
-		DeviceID:    instanceID,
-		DeviceOwner: "compute:default-az",
+		ProjectID: c.filters[ProjectID],
+		DeviceID:  instanceID,
 	}
 
 	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
@@ -722,8 +723,7 @@ func (c *Client) describeNetworkInterfaces() ([]ports.Port, error) {
 	var err error
 
 	opts := ports.ListOpts{
-		ProjectID:   c.filters[ProjectID],
-		DeviceOwner: "compute:default-az",
+		ProjectID: c.filters[ProjectID],
 	}
 
 	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
@@ -787,40 +787,51 @@ func randomString(length int) string {
 	return string(b)
 }
 
-func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, eniID string, address []string) error {
-	log.Errorf("##### Do Unassign static ip addresses for nic %s, addresses to release is %s", eniID, address)
+func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, vpcID string, address string) error {
+	log.Errorf("##### Do Unassign static ip, subnetId is %s address is %s", vpcID, address)
 
-	if len(address) != 1 {
-		return errors.New("no ip address need to be released")
+	secondaryIpPort, err := c.getPortFromIP(vpcID, address)
+
+	if secondaryIpPort.DeviceID == "" {
+		log.Infof("no need to unassign, no deviceId found on port %s (address: %s)", secondaryIpPort.ID, address)
+		return nil
 	}
 
-	port, err := c.getPort(eniID)
+	port, err := c.getPort(secondaryIpPort.DeviceID)
 	if err != nil {
-		log.Errorf("failed to get port: %s, with error %s", eniID, err)
+		log.Errorf("failed to get port: %s, with error %s", secondaryIpPort.DeviceID, err)
 		return err
 	}
 
 	idx := -1
 
 	for i, pair := range port.AllowedAddressPairs {
-		if pair.IPAddress == address[0] {
+		if pair.IPAddress == address {
 			idx = i
 			break
 		}
 	}
 
 	if idx == -1 {
-		return errors.New(fmt.Sprintf("no address found attached in eni %v", eniID))
+		log.Errorf("no address found attached in eni %v", secondaryIpPort.ID)
+		return fmt.Errorf("no address found attached in eni %v", secondaryIpPort.ID)
+	} else {
+		err = c.deletePortAllowedAddressPairs(port.ID, []ports.AddressPair{
+			{
+				IPAddress:  address,
+				MACAddress: port.MACAddress,
+			},
+		})
 	}
 
-	err = c.deletePortAllowedAddressPairs(eniID, []ports.AddressPair{
-		{
-			IPAddress:  address[0],
-			MACAddress: port.MACAddress,
-		},
-	})
+	emptyDeviceID := ""
+	opts := ports.UpdateOpts{
+		DeviceID: &emptyDeviceID,
+	}
+	_, err = ports.Update(c.neutronV2, secondaryIpPort.ID, opts).Extract()
+
 	if err != nil {
-		log.Errorf("failed to update port allowed-address-pairs with error: %v", err)
+		log.Errorf("failed to update port: %s, with error %s", secondaryIpPort.ID, err)
 		return err
 	}
 
@@ -837,22 +848,33 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 	}
 
 	p, err := c.getPortFromIP(port.NetworkID, address)
-	if p == nil {
-		_, err = c.createPort(PortCreateOpts{
-			Name:        fmt.Sprintf(PodInterfaceName+"-%s", randomString(10)),
-			NetworkID:   port.NetworkID,
-			IPAddress:   address,
-			SubnetID:    port.FixedIPs[0].SubnetID,
-			DeviceOwner: PodDeviceOwner,
-			DeviceID:    eniID,
-			ProjectID:   c.filters[ProjectID],
-		})
-		if err != nil {
-			log.Infof("Back to create static ip port failed: %v", err)
+
+	if err != nil {
+		if err.Error() == PortNotFoundErr {
+			_, err = c.createPort(PortCreateOpts{
+				Name:        fmt.Sprintf(PodInterfaceName+"-%s", randomString(10)),
+				NetworkID:   port.NetworkID,
+				IPAddress:   address,
+				SubnetID:    port.FixedIPs[0].SubnetID,
+				DeviceOwner: PodDeviceOwner,
+				DeviceID:    eniID,
+				ProjectID:   c.filters[ProjectID],
+			})
+			if err != nil {
+				log.Infof("Back to create static ip port failed: %v", err)
+				return err
+			}
+			log.Infof("Back to create static ip port: %v success", address)
+		} else {
+			log.Errorf("######## Failed to get port from ip: %s, with error %s", address, err)
 			return err
 		}
-		log.Infof("Back to create static ip port: %v success", address)
 	} else {
+
+		// added judgment to prevent serious bug that ip mount on two eni cards
+		if p.DeviceID != "" {
+			return fmt.Errorf("%s %s", AllocateStaticIPErr, p.DeviceID)
+		}
 		opts := ports.UpdateOpts{
 			DeviceID: &eniID,
 		}
@@ -861,11 +883,6 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 			return err
 		}
 		log.Infof("Update port for static ip %s success", address)
-	}
-
-	if err != nil {
-		log.Errorf("######## Failed to get port with error %s", err)
-		return err
 	}
 
 	for _, pair := range port.AllowedAddressPairs {

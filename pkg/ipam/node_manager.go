@@ -113,7 +113,7 @@ type NodeOperations interface {
 	AllocateStaticIP(ctx context.Context, address string, interfaceId string, pool Pool) error
 
 	// UnbindStaticIP is called to unbind the static ip from eni but retain the neutron port
-	UnbindStaticIP(ctx context.Context, release *ReleaseAction, pool string) error
+	UnbindStaticIP(ctx context.Context, address string, poolID string) error
 
 	// ReleaseStaticIP is called to delete the neutron port
 	ReleaseStaticIP(address string, pool string) error
@@ -247,8 +247,6 @@ func (n *NodeManager) Start(ctx context.Context) error {
 		return fmt.Errorf("Initial synchronization with instances API failed")
 	}
 
-	log.Infoln("@@@@@ NodeManager instancesAPIResync finished")
-
 	// Start an interval based  background resync for safety, it will
 	// synchronize the state regularly and resolve eventual deficit if the
 	// event driven trigger fails, and also release excess IP addresses
@@ -260,14 +258,15 @@ func (n *NodeManager) Start(ctx context.Context) error {
 				RunInterval: time.Minute,
 				DoFunc: func(ctx context.Context) error {
 					if syncTime, ok := n.instancesAPIResync(ctx); ok {
-						n.Resync(ctx, syncTime, "")
-
 						for _, node := range n.nodes {
 							err := n.SyncMultiPool(node)
 							if err != nil {
 								log.Errorf("node %s syncMultiPool failed, error is %s ", node.name, err)
 							}
 						}
+
+						n.Resync(ctx, syncTime, "")
+
 						return nil
 					}
 					return nil
@@ -430,6 +429,9 @@ func (n *NodeManager) Delete(resource *v2.CiliumNode) {
 		if node.retry != nil {
 			node.retry.Shutdown()
 		}
+		if node.instanceSync != nil {
+			node.instanceSync.Shutdown()
+		}
 	}
 
 	// Delete the instance from instanceManager. This will cause Update() to
@@ -535,7 +537,6 @@ func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncS
 	}
 
 	stats.mutex.Unlock()
-	log.Infoln("@@@@@@ resyncNode %s finished", node.name)
 	node.k8sSync.Trigger()
 }
 
@@ -583,6 +584,8 @@ func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time, nodeName s
 		node := n.Get(nodeName)
 		if node != nil {
 			n.resyncNode(ctx, node, &stats, syncTime)
+		} else {
+			log.Errorf("resyncNode failed, node %s not found.", nodeName)
 		}
 	}
 
