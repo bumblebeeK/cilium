@@ -25,17 +25,18 @@ type OpenStackAPI interface {
 	GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceId string) (*ipamTypes.Instance, error)
 	GetVpcs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error)
 	GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap, error)
-	CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool ipam.Pool) (string, *eniTypes.ENI, error)
+	CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool string) (string, *eniTypes.ENI, error)
 	DeleteNetworkInterface(ctx context.Context, eniID string) error
 	AttachNetworkInterface(ctx context.Context, instanceID, eniID string) error
 	DetachNetworkInterface(ctx context.Context, instanceID, eniID string) error
-	AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllocate int) ([]string, error)
-	UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string) (isEmpty bool, err error)
+	AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllocate int, pool string) ([]string, error)
+	UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string, pool string) (isEmpty bool, err error)
 	AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error
 	UnassignPrivateIPAddressesRetainPort(ctx context.Context, subNetID string, address string) error
-	AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string) error
-	DeleteNeutronPort(address string, networkID string) error
+	AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string, portId string) (string, error)
+	DeleteNeutronPort(address string, networkID string, portId string, pool string) error
 	ListNetworkInterface(ctx context.Context, instanceID string) ([]attachinterfaces.Interface, error)
+	RefreshAvailablePool()
 }
 
 // InstancesManager maintains the list of instances. It must be kept up to date
@@ -235,6 +236,7 @@ func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.T
 	// will be refetched from EC2 API and updated to the local cache. Otherwise only
 	// the given instance will be updated.
 	if instanceID == "" {
+		m.api.RefreshAvailablePool()
 		m.mutex.Lock()
 		instanceIds := m.getInstanceIdLocked()
 		m.mutex.Unlock()

@@ -31,7 +31,7 @@ type pool interface {
 	updateLastResync(syncTime time.Time)
 	poolMaintenanceComplete()
 	requireResync()
-	allocateStaticIP(ip string, pool Pool) (string, error)
+	allocateStaticIP(ip string, pool Pool, portId string) (string, string, error)
 	requireSyncCsip()
 	syncCsipComplete()
 	waitingForSyncCsip() bool
@@ -318,7 +318,7 @@ func (p *crdPool) handleMultiPoolIPAllocation(ctx context.Context, a *maintenanc
 //
 // Handshake would be aborted if there are new allocations and the node doesn't have IPs in excess anymore.
 func (p *crdPool) handleIPRelease(ctx context.Context, a *maintenanceAction) (instanceMutated bool, err error) {
-	return p.node.handleIPRelease(ctx, a)
+	return p.node.handleIPRelease(ctx, a, p.name.String())
 }
 
 // abortNoLongerExcessIPs allows for aborting release of IP if new allocations on the node result in a change of excess
@@ -497,15 +497,15 @@ func (p *crdPool) requireResync() {
 	p.resyncNeeded = time.Now()
 }
 
-func (p *crdPool) allocateStaticIP(ip string, pool Pool) (string, error) {
-	eniID, err, stats := p.node.AllocateStaticIP(ip, pool)
+func (p *crdPool) allocateStaticIP(ip string, pool Pool, portID string) (string, string, error) {
+	pId, eniID, err, stats := p.node.AllocateStaticIP(ip, pool, portID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if stats != nil {
 		p.stats = stats
 	}
-	return eniID, nil
+	return pId, eniID, nil
 }
 
 func (p *crdPool) requireSyncCsip() {

@@ -7,17 +7,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/ipam"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/openstack/utils"
+	"github.com/cilium/cilium/pkg/trigger"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/attachinterfaces"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/attributestags"
 	"github.com/gophercloud/gophercloud/pagination"
+	"golang.org/x/sync/semaphore"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cilium/cilium/pkg/cidr"
@@ -39,22 +48,26 @@ import (
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "ipam-openstack-operator")
 
 const (
-	NetworkID = "network_id"
-	SubnetID  = "subnet_id"
 	ProjectID = "project_id"
 
 	VMInterfaceName  = "cilium-vm-port"
 	PodInterfaceName = "cilium-pod-port"
+
+	FreePodInterfaceName      = "cilium-available-port"
+	AvailablePoolFakeDeviceID = "cilium-free-port-"
 
 	VMDeviceOwner  = "compute:"
 	PodDeviceOwner = "network:secondary"
 	CharSet        = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 	FakeAddresses = 100
+
+	MaxCreatePortsInBulk = 100
 )
 
 const (
-	PortNotFoundErr = "port not found"
+	PortNotFoundErr     = "port not found"
+	NoFreePortAvailable = "no more free ports available"
 )
 
 var maxAttachRetries = wait.Backoff{
@@ -74,6 +87,46 @@ type Client struct {
 	limiter    *helpers.APILimiter
 	metricsAPI MetricsAPI
 	filters    map[string]string
+
+	available map[string]*poolAvailable
+	mutex     sync.RWMutex
+
+	// failureRecord used to record the port-id that call api failed
+	failureRecord         sync.Map
+	fillingAvailPool      *trigger.Trigger
+	syncAvailablePoolTime time.Time
+	inCreatingProgress    bool
+
+	mayLeakIps sync.Map
+}
+
+type poolAvailable struct {
+	port  []ports.Port
+	mutex lock.RWMutex
+}
+
+func (a *poolAvailable) get(num int) []ports.Port {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	ava := len(a.port)
+	if ava < num {
+		num = ava
+	}
+	ps := a.port[:num]
+	a.port = a.port[num:]
+	return ps
+}
+
+func (a *poolAvailable) update(ports []ports.Port) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.port = ports
+}
+
+func (a *poolAvailable) size() int {
+	a.mutex.RLock()
+	defer a.mutex.RUnlock()
+	return len(a.port)
 }
 
 // PortCreateOpts options to create port
@@ -87,6 +140,14 @@ type PortCreateOpts struct {
 	DeviceID      string
 	DeviceOwner   string
 	Tags          string
+}
+
+type BulkCreatePortsOpts struct {
+	NetworkId    string
+	SubnetId     string
+	PoolName     string
+	CreateCount  int
+	AvailableIps int
 }
 
 type FixedIPOpt struct {
@@ -132,16 +193,34 @@ func NewClient(metrics MetricsAPI, rateLimit float64, burst int, filters map[str
 	if err != nil {
 		return nil, err
 	}
+	c := &Client{
+		neutronV2:             netV2,
+		novaV2:                computeV2,
+		keystoneV3:            idenV3,
+		limiter:               helpers.NewAPILimiter(metrics, rateLimit, burst),
+		metricsAPI:            metrics,
+		filters:               filters,
+		syncAvailablePoolTime: time.Time{},
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		allocator := controller.NewManager()
+		allocator.UpdateController("neutron-port-allocator",
+			controller.ControllerParams{
+				RunInterval: time.Minute * 2,
+				DoFunc: func(ctx context.Context) error {
+					c.FillingAvailablePool()
+					return nil
+				},
+			})
+	}()
 
 	log.Errorf("######## client details is: %+v", idenV3)
-	return &Client{
-		neutronV2:  netV2,
-		novaV2:     computeV2,
-		keystoneV3: idenV3,
-		limiter:    helpers.NewAPILimiter(metrics, rateLimit, burst),
-		metricsAPI: metrics,
-		filters:    filters,
-	}, nil
+	return c, nil
 }
 
 func newProviderClientOrDie(domainScope bool, timeout int) (*gophercloud.ProviderClient, error) {
@@ -317,22 +396,46 @@ func (c *Client) GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap,
 }
 
 // CreateNetworkInterface creates an ENI with the given parameters
-func (c *Client) CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool ipam.Pool) (string, *eniTypes.ENI, error) {
+func (c *Client) CreateNetworkInterface(ctx context.Context, subnetID, netID, instanceID string, groups []string, pool string) (string, *eniTypes.ENI, error) {
 	log.Errorf("######## Do create interface subnetid is: %s, networkid is: %s", subnetID, netID)
 
-	opt := PortCreateOpts{
-		Name:        fmt.Sprintf(VMInterfaceName+"-%s-%s", pool, randomString(10)),
-		NetworkID:   netID,
-		SubnetID:    subnetID,
-		DeviceOwner: fmt.Sprintf(VMDeviceOwner+"%s", instanceID),
-		ProjectID:   c.filters[ProjectID],
+	var exist bool
+	var available *poolAvailable
+	if available, exist = c.available[pool]; !exist {
+		return "", nil, errors.New(NoFreePortAvailable)
 	}
-	eni, err := c.createPort(opt)
+	ENIName := fmt.Sprintf(VMInterfaceName+"-%s-%s", pool, randomString(10))
+	DeviceOwner := fmt.Sprintf(VMDeviceOwner+"%s", instanceID)
+
+	var ps []ports.Port
+	if available.size() < 0 {
+		return "", nil, errors.New(NoFreePortAvailable)
+	}
+	ps = available.get(1)
+
+	if len(ps) != 1 {
+		return "", nil, errors.New(NoFreePortAvailable)
+	}
+
+	_, err := ports.Update(c.neutronV2, ps[0].ID, ports.UpdateOpts{
+		Name:        &ENIName,
+		DeviceOwner: &DeviceOwner,
+	}).Extract()
+
 	if err != nil {
 		return "", nil, err
 	}
 
-	return eni.ID, eni, nil
+	eni := eniTypes.ENI{
+		ID:             ps[0].ID,
+		IP:             ps[0].FixedIPs[0].IPAddress,
+		MAC:            ps[0].MACAddress,
+		SecurityGroups: ps[0].SecurityGroups,
+		VPC:            eniTypes.VPC{ID: ps[0].NetworkID},
+		Subnet:         eniTypes.Subnet{ID: subnetID},
+	}
+
+	return ps[0].ID, &eni, nil
 }
 
 // DeleteNetworkInterface deletes an ENI with the specified ID
@@ -379,46 +482,62 @@ func (c *Client) DetachNetworkInterface(ctx context.Context, instanceID, eniID s
 
 // AssignPrivateIPAddresses assigns the specified number of secondary IP
 // return allocated IPs
-func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllocate int) ([]string, error) {
-	log.Errorf("######## Do Assign ip addresses for nic %s, count is %d", eniID, toAllocate)
-
+func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllocate int, pool string) ([]string, error) {
 	port, err := c.getPort(eniID)
 	if err != nil {
 		log.Errorf("######## Failed to get port: %s, with error %s", eniID, err)
 		return nil, err
 	}
 
-	var addresses []string
-	for i := 0; i < toAllocate; i++ {
-		opt := PortCreateOpts{
-			Name:        fmt.Sprintf(PodInterfaceName+"-%s", randomString(10)),
-			NetworkID:   port.NetworkID,
-			SubnetID:    port.FixedIPs[0].SubnetID,
-			DeviceOwner: PodDeviceOwner,
-			DeviceID:    eniID,
-			ProjectID:   c.filters[ProjectID],
-		}
-		p, err := c.createPort(opt)
-		if err != nil {
-			log.Errorf("######## Failed to create port with error %s", err)
-			return addresses, err
-		}
+	var exist bool
+	var available *poolAvailable
+	if available, exist = c.available[pool]; !exist {
+		return []string{}, errors.New(NoFreePortAvailable)
+	}
 
-		err = c.addPortAllowedAddressPairs(eniID, []ports.AddressPair{
-			{
-				IPAddress:  p.IP,
-				MACAddress: port.MACAddress,
-			},
-		})
-		if err != nil {
-			log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
-			err = c.deletePort(p.ID)
-			if err != nil {
-				log.Errorf("######## Failed to rollback to delete port with error: %+v", err)
-			}
-			return addresses, err
+	portsToUpdate := map[string]ports.Port{}
+
+	ps := available.get(toAllocate)
+
+	for _, p := range ps {
+		portsToUpdate[p.ID] = p
+	}
+
+	for _, p := range portsToUpdate {
+		if _, exist := c.failureRecord.Load(p.FixedIPs[0].IPAddress); exist {
+			delete(portsToUpdate, p.FixedIPs[0].IPAddress)
 		}
-		addresses = append(addresses, p.IP)
+	}
+
+	log.Infof("######## Do Assign ip addresses for nic %s, count is %d", eniID, toAllocate)
+	var addresses []string
+	var pairs []ports.AddressPair
+	for _, p := range portsToUpdate {
+		portName := fmt.Sprintf(PodInterfaceName+"-%s", randomString(10))
+		_, err = ports.Update(c.neutronV2, p.ID, ports.UpdateOpts{
+			Name:     &portName,
+			DeviceID: &eniID,
+		}).Extract()
+		if err != nil {
+			log.Errorf("######## Failed to update port: %s, allowedAddressPair: %s, with error %s", eniID, p.ID, err)
+		} else {
+			pairs = append(pairs, ports.AddressPair{
+				IPAddress:  p.FixedIPs[0].IPAddress,
+				MACAddress: port.MACAddress,
+			})
+
+			addresses = append(addresses, p.FixedIPs[0].IPAddress)
+		}
+	}
+
+	err = c.addPortAllowedAddressPairs(eniID, pairs)
+	if err != nil {
+		recordTime := time.Now()
+		for _, pair := range pairs {
+			c.failureRecord.Store(pair.IPAddress, recordTime)
+		}
+		log.Errorf("######## Failed to add allowed address pairs: %s, with error %s", eniID, err)
+		return nil, err
 	}
 
 	return addresses, nil
@@ -426,7 +545,7 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 
 // UnassignPrivateIPAddresses unassign specified IP addresses from ENI
 // should not provide Primary IP
-func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string) (isEmpty bool, err error) {
+func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, addresses []string, pool string) (isEmpty bool, err error) {
 	log.Errorf("Do Unassign ip addresses for nic %s, addresses to release is %s", eniID, addresses)
 
 	port, err := c.getPort(eniID)
@@ -468,15 +587,22 @@ func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, a
 		return false, err
 	}
 
+	poolDeviceId := AvailablePoolFakeDeviceID + "-" + pool
+	recordTime := time.Now()
 	for _, ip := range releasedIP {
 		port, err = c.getPortFromIP(networkId, ip)
 		if err != nil {
-			log.Errorf("######## Failed to get port: with ip %s, with error %s", ip, err)
-		}
-		log.Errorf("######## port: with ip %s result is: %+v", ip, port)
-		err = c.deletePort(port.ID)
-		if err != nil {
-			log.Errorf("######## Failed to delete port %s with error: %+v", port.ID, err)
+			log.Errorf("######## failed to get secondary ip %s when return ip to  availible pool, error is %s", ip, err)
+		} else {
+			portName := fmt.Sprintf(FreePodInterfaceName+"-%s", randomString(10))
+			_, err := ports.Update(c.neutronV2, port.ID, ports.UpdateOpts{
+				Name:     &portName,
+				DeviceID: &poolDeviceId,
+			}).Extract()
+			if err != nil {
+				c.mayLeakIps.Store(port.ID, recordTime)
+				log.Errorf("######## failed to return secondary ip: %s to availible pool, error is %s", port.ID, err)
+			}
 		}
 	}
 	port, err = c.getPort(eniID)
@@ -491,7 +617,7 @@ func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, a
 }
 
 // updatePortAllowedAddressPairs to assign secondary ip address
-func (c Client) updatePortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
+func (c *Client) updatePortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
 	opts := ports.UpdateOpts{
 		AllowedAddressPairs: &pairs,
 	}
@@ -504,7 +630,7 @@ func (c Client) updatePortAllowedAddressPairs(eniID string, pairs []ports.Addres
 }
 
 // addPortAllowedAddressPairs to assign secondary ip address
-func (c Client) addPortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
+func (c *Client) addPortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
 	opts := ports.UpdateOpts{
 		AllowedAddressPairs: &pairs,
 	}
@@ -517,7 +643,7 @@ func (c Client) addPortAllowedAddressPairs(eniID string, pairs []ports.AddressPa
 }
 
 // deletePortAllowedAddressPairs to assign secondary ip address
-func (c Client) deletePortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
+func (c *Client) deletePortAllowedAddressPairs(eniID string, pairs []ports.AddressPair) error {
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -533,17 +659,17 @@ func (c Client) deletePortAllowedAddressPairs(eniID string, pairs []ports.Addres
 }
 
 // AddTagToNetworkInterface add tag to port
-func (c Client) AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error {
+func (c *Client) AddTagToNetworkInterface(ctx context.Context, eniID string, tags string) error {
 	return attributestags.Add(c.neutronV2, "ports", eniID, tags).ExtractErr()
 }
 
 // get neutron port
-func (c Client) getPort(id string) (*ports.Port, error) {
+func (c *Client) getPort(id string) (*ports.Port, error) {
 	return ports.Get(c.neutronV2, id).Extract()
 }
 
 // get neutron port with subnetID and ip address
-func (c Client) getPortFromIP(netID, ip string) (*ports.Port, error) {
+func (c *Client) getPortFromIP(netID, ip string) (*ports.Port, error) {
 	var result []ports.Port
 	var err error
 
@@ -681,6 +807,39 @@ func validIPAddress(ipStr string, cidr *net.IPNet) bool {
 	return false
 }
 
+func (c *Client) describeNetworkInterfacesByAvailablePool(pool string) error {
+	var result []ports.Port
+	var err error
+
+	opts := ports.ListOpts{
+		ProjectID: c.filters[ProjectID],
+		DeviceID:  fmt.Sprintf(AvailablePoolFakeDeviceID+"-%s", pool),
+	}
+
+	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
+		result, err = ports.ExtractPorts(page)
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if _, exist := c.available[pool]; !exist {
+		c.available[pool] = &poolAvailable{}
+	}
+
+	c.available[pool].mutex.Lock()
+	c.available[pool].update(result)
+	defer c.available[pool].mutex.Lock()
+
+	return nil
+}
+
 // describeNetworkInterfacesByInstance lists all ENIs by instance
 func (c *Client) describeNetworkInterfacesByInstance(instanceID string) ([]ports.Port, error) {
 	var result []ports.Port
@@ -802,16 +961,26 @@ func (c *Client) UnassignPrivateIPAddressesRetainPort(ctx context.Context, vpcID
 	return nil
 }
 
-func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string) error {
+func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID string, address string, portId string) (string, error) {
 	log.Errorf("######## Do Assign static ip addresses for nic %s", eniID)
 
 	port, err := c.getPort(eniID)
 	if err != nil {
 		log.Errorf("######## Failed to get port: %s, with error %s", eniID, err)
-		return err
+		return "", err
 	}
 
-	p, err := c.getPortFromIP(port.NetworkID, address)
+	p := &ports.Port{}
+	if portId != "" {
+		p, err = c.getPort(portId)
+	} else {
+		p, err = c.getPortFromIP(port.NetworkID, address)
+	}
+
+	if err != nil {
+		log.Errorf("######## Failed to get port, id: %s, address: %s, with error %s", portId, address, err)
+	}
+
 	if p == nil {
 		_, err = c.createPort(PortCreateOpts{
 			Name:        fmt.Sprintf(PodInterfaceName+"-%s", randomString(10)),
@@ -824,7 +993,7 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 		})
 		if err != nil {
 			log.Infof("Back to create static ip port failed: %v", err)
-			return err
+			return "", err
 		}
 		log.Infof("Back to create static ip port: %v success", address)
 	} else {
@@ -833,19 +1002,19 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 		}
 		_, err = ports.Update(c.neutronV2, p.ID, opts).Extract()
 		if err != nil {
-			return err
+			return "", err
 		}
 		log.Infof("Update port for static ip %s success", address)
 	}
 
 	if err != nil {
 		log.Errorf("######## Failed to get port with error %s", err)
-		return err
+		return "", err
 	}
 
 	for _, pair := range port.AllowedAddressPairs {
 		if pair.IPAddress == address {
-			return nil
+			return p.ID, nil
 		}
 	}
 	err = c.addPortAllowedAddressPairs(eniID, []ports.AddressPair{
@@ -856,19 +1025,224 @@ func (c *Client) AssignStaticPrivateIPAddresses(ctx context.Context, eniID strin
 	})
 	if err != nil {
 		log.Errorf("######## Failed to update port allowed-address-pairs with error: %+v", err)
-		return err
+		return "", err
 	}
 
-	return nil
+	return p.ID, nil
 }
 
-func (c *Client) DeleteNeutronPort(address string, networkID string) error {
-	port, err := c.getPortFromIP(networkID, address)
+func (c *Client) DeleteNeutronPort(address string, networkID string, portId string, pool string) error {
+	var port *ports.Port
+	var err error
+	if portId != "" {
+		port, err = c.getPort(portId)
+	}
+	if port == nil {
+		port, err = c.getPortFromIP(networkID, address)
+	}
 	if err != nil {
 		if err.Error() == PortNotFoundErr {
 			return nil
 		}
 		return err
 	}
-	return c.deletePort(port.ID)
+
+	poolDeviceId := AvailablePoolFakeDeviceID + "-" + pool
+	portName := fmt.Sprintf(FreePodInterfaceName+"-%s", randomString(10))
+
+	_, err = ports.Update(c.neutronV2, port.ID, ports.UpdateOpts{
+		DeviceID: &poolDeviceId,
+		Name:     &portName,
+	}).Extract()
+
+	return err
+}
+
+func (c *Client) bulkCreatePort(opts []BulkCreatePortsOpts) {
+	log.Infof("##### ready to create ports in bulk, opts is %+v ", opts)
+	var copts ports.BulkCreateOpts
+
+	sort.Slice(opts, func(i, j int) bool {
+		return opts[i].AvailableIps < opts[j].AvailableIps
+	})
+
+	for _, opt := range opts {
+		for i := 0; i < opt.CreateCount; i++ {
+			o := ports.CreateOpts{
+				Name:        fmt.Sprintf(FreePodInterfaceName+"-%s", randomString(10)),
+				NetworkID:   opt.NetworkId,
+				DeviceOwner: PodDeviceOwner,
+				DeviceID:    AvailablePoolFakeDeviceID + opt.PoolName,
+				ProjectID:   c.filters[ProjectID],
+				FixedIPs: FixedIPOpts{
+					{
+						SubnetID: opt.SubnetId,
+					},
+				},
+			}
+			copts.Ports = append(copts.Ports, o)
+		}
+	}
+
+	if len(copts.Ports) > MaxCreatePortsInBulk {
+		copts.Ports = copts.Ports[:MaxCreatePortsInBulk]
+	}
+
+	now := time.Now()
+	var err error
+	defer func() {
+		if err != nil {
+			log.Errorf("create %d ports in bulk failed, takes time %s, error is %s.", len(copts.Ports), time.Since(now), err)
+		} else {
+			log.Infof("create %d ports in bulk success, takes time %s.", len(copts.Ports), time.Since(now))
+		}
+	}()
+	_, err = ports.BulkCreate(c.neutronV2, copts).Extract()
+}
+
+func (c *Client) FillingAvailablePool() {
+	c.mutex.RLock()
+	progress := c.inCreatingProgress
+	lastSyncTime := c.syncAvailablePoolTime
+	c.mutex.Unlock()
+
+	if progress {
+		log.Infof("allocate cancel due to last filling job still in progress")
+		return
+	}
+
+	if time.Now().Sub(lastSyncTime) < time.Minute*2 {
+		log.Infof("Can't call create port api too often !")
+		return
+	}
+
+	defer func() {
+		c.mutex.Lock()
+		c.inCreatingProgress = false
+		c.syncAvailablePoolTime = time.Now()
+		c.mutex.Unlock()
+	}()
+
+	cpips := ipam.ListCiliumIPPool()
+	sem := semaphore.NewWeighted(5)
+
+	var opts []BulkCreatePortsOpts
+	mutex := sync.Mutex{}
+
+	for _, cpip := range cpips {
+		if cpip.Status.Active && !cpip.Status.MaxPortsReached {
+			err := sem.Acquire(context.TODO(), 1)
+			if err != nil {
+				continue
+			}
+			go func() {
+				defer sem.Release(1)
+				// portCntFromNeutron indicates the number of existing ports belongs to the subnet
+				portCntFromNeutron, err := c.getPortCountBySubnetId(cpip.Spec.SubnetId, cpip.Spec.VPCId)
+				if err != nil {
+					log.Errorf("##### error occurred while get pool %s ports count from neutron: %s.", cpip.Name, err)
+					return
+				}
+
+				maxIps := 0
+				availableIps := 0
+				if available, exist := c.available[cpip.Name]; exist {
+					availableIps = available.size()
+				}
+
+				if maxIps, err = utils.GetMaxIpsFromCIDR(cpip.Spec.CIDR); err != nil {
+					log.Errorf("##### error occurred while parse cidr from cpip %s.", cpip.Name)
+					return
+				}
+
+				waterMark, err := strconv.ParseFloat(cpip.Spec.Watermark, 64)
+				if err != nil {
+					log.Errorf("##### can not get cpip %s's watermark, error is %s.", cpip.Name, err)
+					return
+				}
+
+				expectedCnt := int(math.Floor(float64(maxIps) * waterMark))
+
+				createCount := expectedCnt - portCntFromNeutron
+				log.Infof("##### ready to fill available pool for %s, create count is %d, expected count is %d, available ips is %d",
+					cpip.Name, createCount, expectedCnt, availableIps)
+
+				if createCount <= 0 {
+					log.Infof("##### no need to create port for pool %s, cause has reached the waterMark.", cpip.Name)
+					err = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", true)
+					if err != nil {
+						log.Errorf("update ciliumPodIPPool %s failed, error is %s.", cpip.Name, err)
+					}
+					return
+				}
+
+				opt := BulkCreatePortsOpts{
+					PoolName:     cpip.Name,
+					SubnetId:     cpip.Spec.SubnetId,
+					NetworkId:    cpip.Spec.VPCId,
+					AvailableIps: availableIps,
+				}
+
+				if createCount > 20 {
+					opt.CreateCount = 20
+				} else {
+					opt.CreateCount = createCount
+				}
+				mutex.Lock()
+				opts = append(opts, opt)
+				mutex.Unlock()
+			}()
+
+		}
+	}
+	// Acquire the full semaphore, this requires all goroutines to
+	// complete and thus blocks until all cpip are synced
+	sem.Acquire(context.TODO(), 5)
+
+	c.bulkCreatePort(opts)
+}
+
+func (c *Client) RefreshAvailablePool() {
+	cpips := ipam.ListCiliumIPPool()
+	log.Infoln("#### ready to refresh available pool")
+	for _, cpip := range cpips {
+		if cpip.Status.Active {
+			go func() {
+				err := c.describeNetworkInterfacesByAvailablePool(cpip.Name)
+				if err != nil {
+					log.Errorf("###### Failed to refresh availble pool for %s, error is %s.", cpip.Name, err)
+				}
+			}()
+		}
+	}
+}
+
+func (c *Client) getPortCountBySubnetId(subnetId, networkId string) (int, error) {
+	var result []ports.Port
+	var err error
+
+	opts := ports.ListOpts{
+		ProjectID: c.filters[ProjectID],
+		NetworkID: networkId,
+		FixedIPs: []ports.FixedIPOpts{
+			{
+				SubnetID: subnetId,
+			},
+		},
+	}
+
+	err = ports.List(c.neutronV2, opts).EachPage(func(page pagination.Page) (bool, error) {
+		result, err = ports.ExtractPorts(page)
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return len(result), nil
 }
