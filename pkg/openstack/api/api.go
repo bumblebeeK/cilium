@@ -1224,7 +1224,7 @@ func (c *Client) FillingAvailablePool() {
 
 				if createCount <= 0 {
 					log.Infof("##### no need to create port for pool %s, cause has reached the waterMark.", cpip.Name)
-					err = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", true, availableIps)
+					err = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", true, -1)
 					if err != nil {
 						log.Errorf("update ciliumPodIPPool %s failed, error is %s.", cpip.Name, err)
 					}
@@ -1281,6 +1281,10 @@ func (c *Client) RefreshAvailablePool() {
 				err := c.describeNetworkInterfacesByAvailablePool(pool)
 				if err != nil {
 					log.Errorf("###### Failed to refresh availble pool for %s, error is %s.", pool, err)
+				}
+
+				if _, exist := c.available[pool]; exist {
+					_ = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", false, c.available[pool].size())
 				}
 			}(cpip.Name)
 		}
