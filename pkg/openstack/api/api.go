@@ -167,6 +167,21 @@ type FixedIPOpt struct {
 }
 type FixedIPOpts []FixedIPOpt
 
+type failureCondition int
+
+const (
+	AddAllowedAddressPair failureCondition = iota
+	UpdatePort
+)
+
+type failureRecord struct {
+	recordTime       time.Time
+	expectedDeviceId string
+	condition        failureCondition
+	pool             string
+	ipAddr           string
+}
+
 // MetricsAPI represents the metrics maintained by the OpenStack API client
 type MetricsAPI interface {
 	helpers.MetricsAPI
@@ -225,6 +240,76 @@ func NewClient(metrics MetricsAPI, rateLimit float64, burst int, filters map[str
 				RunInterval: time.Minute,
 				DoFunc: func(ctx context.Context) error {
 					c.FillingAvailablePool()
+					return nil
+				},
+			})
+	}()
+
+	go func() {
+		cleaner := controller.NewManager()
+		cleaner.UpdateController("failure-record-cleaner",
+			controller.ControllerParams{
+				RunInterval: time.Minute * 5,
+				DoFunc: func(ctx context.Context) error {
+					processTime := time.Now()
+					c.failureRecord.Range(
+						func(key, value any) bool {
+							record := value.(failureRecord)
+							if processTime.Sub(record.recordTime) < time.Minute*20 {
+								return false
+							}
+
+							portId := key.(string)
+							port, err := c.getPort(portId)
+							if err != nil {
+								log.Errorf("#### Failed to get port:%s when do neutron-port-cleaner, error is %s ",
+									portId, err)
+								return false
+							}
+
+							var returnToAvailablePool = func() {
+								poolDeviceId := AvailablePoolFakeDeviceID + record.pool
+								portName := fmt.Sprintf(FreePodInterfaceName+"-%s", randomString(10))
+								_, err = ports.Update(c.neutronV2, port.ID, ports.UpdateOpts{
+									Name:     &portName,
+									DeviceID: &poolDeviceId,
+								}).Extract()
+								if err == nil {
+									c.failureRecord.Delete(key)
+								}
+								return
+							}
+
+							switch record.condition {
+							case AddAllowedAddressPair:
+								eniPort, err := c.getPort(record.expectedDeviceId)
+								if err != nil {
+									log.Errorf("#### Failed to get port %s when do neutron-port-cleaner, error is %s ",
+										portId, err)
+									return false
+								}
+								for _, pair := range eniPort.AllowedAddressPairs {
+									if pair.IPAddress == record.ipAddr {
+										// safe delete
+										c.failureRecord.Delete(key)
+										return false
+									}
+								}
+								returnToAvailablePool()
+							case UpdatePort:
+								if port.DeviceID == AvailablePoolFakeDeviceID+record.pool {
+									c.failureRecord.Delete(key)
+									return false
+								}
+								if port.DeviceID == record.expectedDeviceId {
+									returnToAvailablePool()
+									return false
+								}
+								log.Errorf("######## ops !!! port device id is %s", port.DeviceID)
+							}
+
+							return false
+						})
 					return nil
 				},
 			})
@@ -531,7 +616,7 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 		}
 
 		log.Infof("######## Do Assign ip addresses for nic %s, count is %d", eniID, toAllocate)
-
+		recordTime := time.Now()
 		for _, p := range portsToUpdate {
 			portName := fmt.Sprintf(PodInterfaceName+"-%s", randomString(10))
 			_, err = ports.Update(c.neutronV2, p.ID, ports.UpdateOpts{
@@ -539,6 +624,12 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 				DeviceID: &eniID,
 			}).Extract()
 			if err != nil {
+				c.failureRecord.Store(p.ID, failureRecord{
+					expectedDeviceId: eniID,
+					recordTime:       recordTime,
+					condition:        UpdatePort,
+					pool:             pool,
+				})
 				log.Errorf("######## Failed to update port: %s, allowedAddressPair: %s, with error %s", eniID, p.ID, err)
 			} else {
 				pairs = append(pairs, ports.AddressPair{
@@ -550,33 +641,6 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 				pids = append(pids, p.ID)
 			}
 		}
-	} else {
-		for i := 0; i < toAllocate; i++ {
-			opt := PortCreateOpts{
-				Name:        fmt.Sprintf(PodInterfaceName+"-%s", randomString(10)),
-				NetworkID:   port.NetworkID,
-				SubnetID:    port.FixedIPs[0].SubnetID,
-				DeviceOwner: PodDeviceOwner,
-				DeviceID:    eniID,
-				ProjectID:   c.filters[ProjectID],
-			}
-			p, err := c.createPort(opt)
-			if err != nil {
-				recordTime := time.Now()
-				for _, id := range pids {
-					c.failureRecord.Store(id, recordTime)
-				}
-				log.Errorf("######## Failed to create port with error %s", err)
-				return addresses, err
-			}
-			pairs = append(pairs, ports.AddressPair{
-				IPAddress:  p.IP,
-				MACAddress: port.MACAddress,
-			})
-
-			addresses = append(addresses, p.IP)
-			pids = append(pids, p.ID)
-		}
 	}
 
 	if len(pids) > 0 {
@@ -584,7 +648,12 @@ func (c *Client) AssignPrivateIPAddresses(ctx context.Context, eniID string, toA
 		if err != nil {
 			recordTime := time.Now()
 			for _, id := range pids {
-				c.failureRecord.Store(id, recordTime)
+				c.failureRecord.Store(id, failureRecord{
+					expectedDeviceId: eniID,
+					recordTime:       recordTime,
+					condition:        AddAllowedAddressPair,
+					pool:             pool,
+				})
 			}
 			log.Errorf("######## Failed to add allowed address pairs: %s, with error %s, pairs: %+v", eniID, err, pairs)
 			return nil, err
@@ -694,6 +763,7 @@ func (c *Client) addPortAllowedAddressPairs(eniID string, pairs []ports.AddressP
 	}
 	port, err := ports.AddAllowedAddressPair(c.neutronV2, eniID, opts).Extract()
 	if err != nil {
+		log.Errorf("##### Failed to add allowed address pair, error is %s", err)
 		return err
 	}
 	log.Errorf("######## port updated is: %+v", port)
@@ -1231,9 +1301,11 @@ func (c *Client) FillingAvailablePool() {
 
 				if createCount <= 0 {
 					log.Infof("##### no need to create port for pool %s, cause has reached the waterMark.", cpip.Name)
-					err = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", true, availableIps)
-					if err != nil {
-						log.Errorf("update ciliumPodIPPool %s failed, error is %s.", cpip.Name, err)
+					if expectedCnt == portCntFromNeutron {
+						err = ipam.UpdateCiliumIPPoolStatus(cpip.Name, "", "", "", true, -1)
+						if err != nil {
+							log.Errorf("update ciliumPodIPPool %s failed, error is %s.", cpip.Name, err)
+						}
 					}
 					return
 				}
