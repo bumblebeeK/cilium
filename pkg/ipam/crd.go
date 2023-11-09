@@ -625,6 +625,7 @@ func (n *nodeStore) allocate(ip net.IP, pool Pool, owner string) (*ipamTypes.All
 		}
 	} else {
 		ipInfo, exist = n.ownNode.Spec.IPAM.CrdPools[pool.String()][ip.String()]
+		ipInfo.Pool = pool.String()
 		if !exist {
 			return nil, NewIPNotAvailableInPoolError(ip)
 		}
