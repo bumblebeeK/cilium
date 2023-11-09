@@ -430,20 +430,9 @@ func (n *Node) UpdatedResource(resource *v2.CiliumNode) bool {
 
 	n.recalculate()
 
-	allocationNeeded := false
+	n.k8sSync.Trigger()
 
-	for _, pool := range n.pools {
-		if pool.allocationNeeded() {
-			allocationNeeded = true
-			pool.requirePoolMaintenance()
-		}
-	}
-
-	if allocationNeeded {
-		n.poolMaintainer.Trigger()
-	}
-
-	return allocationNeeded
+	return false
 }
 
 func (n *Node) resourceAttached() (attached bool) {

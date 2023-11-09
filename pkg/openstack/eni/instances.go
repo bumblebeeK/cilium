@@ -251,7 +251,6 @@ func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.T
 	}
 
 	if subnets != nil {
-
 		m.subnets = subnets
 		ipam.SyncPoolToAPIServer(subnets)
 	}
