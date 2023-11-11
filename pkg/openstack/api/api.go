@@ -119,6 +119,9 @@ func (a *poolAvailable) get(num int) []ports.Port {
 	if ava < num {
 		num = ava
 	}
+	if num == 0 {
+		return []ports.Port{}
+	}
 	log.Debugf("##### before get, pool size is %d", len(a.port))
 	dest := make([]ports.Port, num)
 	ps := a.port[:num]
@@ -724,10 +727,10 @@ func (c *Client) UnassignPrivateIPAddresses(ctx context.Context, eniID string, a
 
 	poolDeviceId := AvailablePoolFakeDeviceID + pool
 	recordTime := time.Now()
-	for _, ip := range releasedIP {
-		port, err = c.getPortFromIP(networkId, ip)
+	for _, pair := range allowedAddressPairs {
+		port, err = c.getPortFromIP(networkId, pair.IPAddress)
 		if err != nil {
-			log.Errorf("######## failed to get secondary ip %s when return ip to  availible pool, error is %s", ip, err)
+			log.Errorf("######## failed to get secondary ip %s when return ip to  availible pool, error is %s", pair.IPAddress, err)
 		} else {
 			portName := fmt.Sprintf(FreePodInterfaceName+"-%s", randomString(10))
 			_, err := ports.Update(c.neutronV2, port.ID, ports.UpdateOpts{
