@@ -316,18 +316,16 @@ func (m extraManager) updateStaticIP(ipCrd *v2alpha1.CiliumStaticIP) error {
 		}
 	case v2alpha1.WaitingForRelease:
 		if n, ok := k8sManager.nodeManager.nodes[node]; ok {
-			if am, ok := n.resource.Spec.IPAM.CrdPools[pool]; ok {
-				if _, ok := am[ip]; !ok {
-					log.Debugf("ready to delete static ip %s for pod %s on node: %s", ip, podFullName, node)
-					err := n.Ops().ReleaseStaticIP(ip, pool, ipCrd.Spec.PortId)
-					if err != nil {
-						return fmt.Errorf("release static ip: %v for pod %v failed: %s", ip, podFullName, err)
-					}
-					option := staticip.NewUpdateCSIPOption().WithStatus(v2alpha1.Released)
-					err = k8sManager.UpdateStaticIP(podFullName, option)
-					if err != nil {
-						return err
-					}
+			if _, ok := n.pools[Pool(pool)]; ok {
+				log.Debugf("ready to delete static ip %s for pod %s on node: %s", ip, podFullName, node)
+				err := n.Ops().ReleaseStaticIP(ip, pool, ipCrd.Spec.PortId)
+				if err != nil {
+					return fmt.Errorf("release static ip: %v for pod %v failed: %s", ip, podFullName, err)
+				}
+				option := staticip.NewUpdateCSIPOption().WithStatus(v2alpha1.Released)
+				err = k8sManager.UpdateStaticIP(podFullName, option)
+				if err != nil {
+					return err
 				}
 			} else {
 				return fmt.Errorf("pool %s not found on node %s, please check it", pool, node)
@@ -568,13 +566,9 @@ func (extraManager) processNextWorkItem(syncHandler func(key string) error) bool
 	if quit {
 		return false
 	}
-	defer ciliumStaticIPManagerQueue.Done(key)
-
-	log.Infof("process csip %s", key.(string))
-	k8sManager.sem.Acquire(context.TODO(), 1)
-
+	defer log.Infof("process csip %s", key.(string))
 	go func(key interface{}) {
-		defer k8sManager.sem.Release(1)
+		defer ciliumStaticIPManagerQueue.Done(key)
 		err := syncHandler(key.(string))
 		if err == nil {
 			// If err is nil we can forget it from the queue, if it is not nil
@@ -582,7 +576,6 @@ func (extraManager) processNextWorkItem(syncHandler func(key string) error) bool
 			ciliumStaticIPManagerQueue.Forget(key)
 			return
 		}
-		log.Errorf("err: %s , err: %v", err, err == nil)
 
 		log.WithError(err).Errorf("sync %q failed with %v", key, err)
 		ciliumStaticIPManagerQueue.AddRateLimited(key)

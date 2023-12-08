@@ -109,7 +109,7 @@ func (m *Manager) ListLocalReleasedCSIP() []*v2alpha1.CiliumStaticIP {
 		if ipsInt[i].(*v2alpha1.CiliumStaticIP).Spec.NodeName == nodeTypes.GetName() &&
 			ipsInt[i].(*v2alpha1.CiliumStaticIP).Status.IPStatus == v2alpha1.Released {
 			// filter out csips that belong to localNode and status is Released
-			out[j] = ipsInt[i].(*v2alpha1.CiliumStaticIP)
+			out = append(out, ipsInt[i].(*v2alpha1.CiliumStaticIP))
 			j++
 		}
 	}

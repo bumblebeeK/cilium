@@ -219,7 +219,8 @@ func (ipam *IPAM) allocateNextFamily(family Family, owner string, pool Pool, nee
 						}
 						option := staticip.NewUpdateCSIPOption().
 							WithStatus(v2alpha1.InUse).
-							WithRecycleTime(recycleTime)
+							WithRecycleTime(recycleTime).
+							WithENIId(result.Resource)
 						ipam.staticIPManager.UpdateStaticIP(ipCrd, option)
 						return
 					case v2alpha1.InUse:
